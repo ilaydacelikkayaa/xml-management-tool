@@ -1,3 +1,12 @@
 .env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
 .venv/
+Issue-current.xml
+Issue-preview.xml
+Issue-backup.xml
+Issue-backup-python.xml
+*.log
 .DS_Store

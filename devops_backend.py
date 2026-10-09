@@ -4,14 +4,18 @@ import xml.etree.ElementTree as ET
 import shutil
 import subprocess
 from dotenv import load_dotenv
-
-
+import winrm
+import getpass
+import base64
+windows_ip = "192.168.64.2"
+username = r"WIN-9B0E3EPO4LV\Administrator"
 wiql_url = "http://win-9b0e3epo4lv/XMLLabCollection/_apis/wit/wiql?api-version=7.0"
 
 load_dotenv()
 token = os.getenv("AZURE_DEVOPS_PAT")
+password = getpass.getpass("Windows şifresi: ")
 
-
+#A
 
 def get_work_item_ids(work_item_type: str):
     wiql_body = {
@@ -90,8 +94,6 @@ def analyze_field(work_item_type: str, field_ref: str):
     return analysis
 
 
-
-
 def find_field_references(xml_path: str, field_ref: str):
     field_name = None
     field_type = None
@@ -130,7 +132,7 @@ def analyze_field_full(work_item_type: str, field_ref: str, xml_path: str):
         "xml_info": xml_info
     }
 
-
+#B
 
 def evaluate_cleanup_candidate(analysis: dict):
     rate = analysis["usage"]["rate"]
@@ -165,6 +167,7 @@ def build_field_report(analysis: dict):
         "candidate": candidate
     }
 
+#C
 def create_backup(xml_path: str, backup_path: str):
     try:
         shutil.copy2(xml_path, backup_path)
@@ -259,54 +262,7 @@ def build_change_preview(
 
 
 
-analysis_result = analyze_field_full(
-    "Issue",
-    "Lab.OldSystemCode",
-    "/Users/ilayda/Desktop/Issue-after.xml"
-)
-
-print(analysis_result)
-
-
-cleanup_result = evaluate_cleanup_candidate(analysis_result)
-print(cleanup_result)
-
-
-field_report = build_field_report(analysis_result)
-print(field_report)
-
-
-create_result = create_backup(
-    "/Users/ilayda/Desktop/Issue-after.xml",
-    "/Users/ilayda/Desktop/Issue-backup-python.xml"
-)
-
-print(create_result)
-
-
-hide_result = hide_field_from_ui(
-    "/Users/ilayda/Desktop/Issue-after.xml",
-    "Lab.OldSystemCode",
-    "/Users/ilayda/Desktop/Issue-preview.xml"
-)
-
-print(hide_result)
-
-
-verify_result = find_field_references(
-    "/Users/ilayda/Desktop/Issue-preview.xml",
-    "Lab.OldSystemCode"
-)
-
-print(verify_result)
-
-
-validation_result = validate_xml(
-    "/Users/ilayda/Desktop/Issue-preview.xml"
-)
-print(validation_result)
-
-# Temporary: witadmin validation was performed manually on Windows VM
+''' Temporary: witadmin validation was performed manually on Windows VM
 azure_validation = True
 
 preview = build_change_preview(
@@ -317,6 +273,7 @@ preview = build_change_preview(
 )
 
 print(preview)
+'''
 
 def can_apply_change(preview: dict, confirmed: bool):
     technical_ready = preview["ready_to_apply"]
@@ -346,12 +303,13 @@ def prepare_apply(confirmation_result:dict,preview_xml_path:str):
                "success": True,
                "status": "READY_FOR_IMPORT",
                "xml_path": preview_xml_path
-          }     
+          }
 prepare_apply(test1, "/Users/ilayda/Desktop/Issue-preview.xml")
 prepare_result = prepare_apply(
     test2,
     "/Users/ilayda/Desktop/Issue-preview.xml"
 )
+#D
 def build_import_command(prepare_result:dict,collection_url:str,project:str,windows_path:str):
     result=prepare_result["success"]
     if result == False:
@@ -373,39 +331,79 @@ import_result = build_import_command(
 
 print(import_result)
 
+def build_export_command(witadmin:str,collection_url: str, project: str, work_item_type: str, output_path: str):
+    if not witadmin or not collection_url or not project or not work_item_type or not output_path:
+         return {
+            "success": False,
+            "error": "Missing required parameter"
+          }
+    args = [
+        "exportwitd",
+        f"/collection:{collection_url}",
+        f"/p:{project}",
+        f"/n:{work_item_type}",
+        f"/f:{output_path}"
+    ]
+    return{
+    "success": True,
+    "program": witadmin,
+    "args":args
+    }
+export_result = build_export_command(r"C:\Program Files\Microsoft Visual Studio\18\TeamExplorer\Common7\IDE\CommonExtensions\Microsoft\TeamFoundation\Team Explorer\witadmin.exe",
+    "http://win-9b0e3epo4lv/XMLLabCollection",
+    "XMLManagementLab",
+    "Issue",
+    r"C:\Issue-current.xml"
+)
 
-def execute_command(command: str):
+print(export_result)
+
+def execute_command(program:str,args:list,session:winrm.Session):
     try:
-        result = subprocess.run(
-            [command],
-            capture_output=True,
-            text=True
-        )
+        result=session.run_cmd(f'"{program}"',args)
 
-        if result.returncode == 0:
-            return {
-                "success": True,
-                "stdout": result.stdout.strip(),
-                "returncode": result.returncode
-            }
-        else:
-            return {
-                "success": False,
-                "stderr": result.stderr.strip(),
-                "returncode": result.returncode
-            }
+        return{
+            "success": result.status_code == 0,
+            "status_code": result.status_code,
+            "stdout": result.std_out.decode(errors="replace").strip(),
+            "stderr": result.std_err.decode(errors="replace").strip()
+        }
 
-    except FileNotFoundError as e:
+    except Exception as e:
+
         return {
             "success": False,
             "error": str(e),
-            "error_type": "COMMAND_NOT_FOUND"
+            "error_type": "REMOTE_EXECUTION_ERROR"
         }
-    
-if import_result["success"] == True:
-    execute_result=execute_command(import_result["command"])
+session = winrm.Session(
+    f"http://{windows_ip}:5985/wsman",
+    auth=(username, password),
+    transport="ntlm",
+    message_encryption="always"
+)
+witadmin_path = (
+    r"C:\Program Files\Microsoft Visual Studio\18\TeamExplorer"
+    r"\Common7\IDE\CommonExtensions\Microsoft"
+    r"\TeamFoundation\Team Explorer\witadmin.exe"
+)
+
+export_result = build_export_command(
+    witadmin_path,
+    "http://win-9b0e3epo4lv/XMLLabCollection",
+    "XMLManagementLab",
+    "Issue",
+    r"C:\Issue-current.xml"
+)
+if export_result["success"]:
+    execute_result = execute_command(
+        export_result["program"],
+        export_result["args"],
+        session
+    )
 else:
-    execute_result = import_result
+    execute_result = export_result
+
 print(execute_result)
 
 def verify(verification_result: dict):
@@ -418,4 +416,89 @@ def verify(verification_result: dict):
     else:
        return {
     "verified": False
-     } 
+     }
+def check_remote_file(session: winrm.Session, remote_path: str):
+    script=f'Test-Path "{remote_path}"'
+    result = session.run_ps(script)
+    return result
+
+check_result = check_remote_file(session, r"C:\Issue-current.xml")
+
+print("Status:", check_result.status_code)
+print("Dosya var mı:", check_result.std_out.decode().strip())
+
+def read_remote_xml(session: winrm.Session, remote_path: str):
+    script=rf'''
+    $bytes = [System.IO.File]::ReadAllBytes("{remote_path}")
+    [Convert]::ToBase64String($bytes)'''
+    result=session.run_ps(script)
+    return result
+response = read_remote_xml(session, r"C:\Issue-current.xml")
+
+print("Status:", response.status_code)
+print("Hata:", response.std_err.decode())
+print("Gelen veri uzunluğu:", len(response.std_out))
+
+xml_bytes = base64.b64decode(response.std_out.strip())
+
+with open("Issue-current.xml", "wb") as e:
+    e.write(xml_bytes)
+
+def main():
+    analysis_result = analyze_field_full(
+    "Issue",
+    "Lab.OldSystemCode",
+    "/Users/ilayda/Desktop/Issue-current.xml"
+)
+
+    print(analysis_result)
+    cleanup_result = evaluate_cleanup_candidate(analysis_result)
+    print(cleanup_result)
+    field_report = build_field_report(analysis_result)
+    print(field_report)
+    create_result = create_backup(
+    "/Users/ilayda/Desktop/Issue-current.xml",
+    "/Users/ilayda/Desktop/Issue-backup-python.xml"
+     )
+
+    print(create_result)
+    if not create_result["success"]:
+     print("Backup başarısız! XML değişikliği durduruldu.")
+     return
+
+    hide_result = hide_field_from_ui(
+    "/Users/ilayda/Desktop/Issue-current.xml",
+    "Lab.OldSystemCode",
+    "/Users/ilayda/Desktop/Issue-preview.xml"
+)
+
+    print(hide_result)
+
+    if not hide_result["success"]:
+      print("Alan gizlenemedi. İşlem durduruldu.")
+      return
+
+    verify_result = find_field_references(
+    "/Users/ilayda/Desktop/Issue-preview.xml",
+    "Lab.OldSystemCode"
+)
+
+    print(verify_result)
+
+
+    validation_result = validate_xml(
+    "/Users/ilayda/Desktop/Issue-preview.xml"
+)
+    print(validation_result)
+    preview = build_change_preview(
+    analysis_result,
+    verify_result,
+    validation_result,
+    azure_validation=False
+)
+
+    print("Preview:", preview)
+    print("Sunucuya import yapılmadı.")
+
+if __name__ == "__main__":
+    main()
