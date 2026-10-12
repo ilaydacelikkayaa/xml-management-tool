@@ -13,7 +13,6 @@ wiql_url = "http://win-9b0e3epo4lv/XMLLabCollection/_apis/wit/wiql?api-version=7
 
 load_dotenv()
 token = os.getenv("AZURE_DEVOPS_PAT")
-password = getpass.getpass("Windows şifresi: ")
 
 #A
 
@@ -186,20 +185,33 @@ def create_backup(xml_path: str, backup_path: str):
 def hide_field_from_ui(xml_path: str, field_ref: str, output_path: str):
     tree = ET.parse(xml_path)
     root = tree.getroot()
-
+    field_exists = False
     removed_count = 0
-
+   
+    for field in root.iter("FIELD"):
+        if field.get("refname") == field_ref:
+          field_exists = True
+          break
+    if not field_exists:
+            return{
+                "success": False,
+                "message": "Field does not exist in XML"
+            }
+    
     for parent in root.iter():
         for child in list(parent):
             if child.tag == "Control" and child.get("FieldName") == field_ref:
                 parent.remove(child)
                 removed_count += 1
 
+
     if removed_count == 0:
-        return {
-            "success": False,
-            "field_ref": field_ref,
-            "message": "No matching UI Control found."
+       return {
+        "success": True,
+        "field_ref": field_ref,
+        "status": "ALREADY_HIDDEN",
+        "removed_controls": 0,
+        "output_path":None
         }
 
     tree.write(
@@ -286,10 +298,6 @@ def can_apply_change(preview: dict, confirmed: bool):
         "apply_allowed": apply_allowed
     }
 
-test1=can_apply_change(preview=preview,confirmed=False)
-test2=can_apply_change(preview=preview,confirmed=True)
-print(test1)
-print(test2)
 
 def prepare_apply(confirmation_result:dict,preview_xml_path:str):
       apply_allowed = confirmation_result["apply_allowed"]
@@ -304,12 +312,7 @@ def prepare_apply(confirmation_result:dict,preview_xml_path:str):
                "status": "READY_FOR_IMPORT",
                "xml_path": preview_xml_path
           }
-prepare_apply(test1, "/Users/ilayda/Desktop/Issue-preview.xml")
-prepare_result = prepare_apply(
-    test2,
-    "/Users/ilayda/Desktop/Issue-preview.xml"
-)
-#D
+
 def build_import_command(prepare_result:dict,collection_url:str,project:str,windows_path:str):
     result=prepare_result["success"]
     if result == False:
@@ -322,14 +325,6 @@ def build_import_command(prepare_result:dict,collection_url:str,project:str,wind
             "success": True,
             "command": command
         }
-import_result = build_import_command(
-    prepare_result,
-    "http://win-9b0e3epo4lv/XMLLabCollection",
-    "XMLManagementLab",
-    r"C:\Issue-preview.xml"
-)
-
-print(import_result)
 
 def build_export_command(witadmin:str,collection_url: str, project: str, work_item_type: str, output_path: str):
     if not witadmin or not collection_url or not project or not work_item_type or not output_path:
@@ -349,15 +344,6 @@ def build_export_command(witadmin:str,collection_url: str, project: str, work_it
     "program": witadmin,
     "args":args
     }
-export_result = build_export_command(r"C:\Program Files\Microsoft Visual Studio\18\TeamExplorer\Common7\IDE\CommonExtensions\Microsoft\TeamFoundation\Team Explorer\witadmin.exe",
-    "http://win-9b0e3epo4lv/XMLLabCollection",
-    "XMLManagementLab",
-    "Issue",
-    r"C:\Issue-current.xml"
-)
-
-print(export_result)
-
 def execute_command(program:str,args:list,session:winrm.Session):
     try:
         result=session.run_cmd(f'"{program}"',args)
@@ -376,35 +362,13 @@ def execute_command(program:str,args:list,session:winrm.Session):
             "error": str(e),
             "error_type": "REMOTE_EXECUTION_ERROR"
         }
-session = winrm.Session(
-    f"http://{windows_ip}:5985/wsman",
-    auth=(username, password),
-    transport="ntlm",
-    message_encryption="always"
-)
+
 witadmin_path = (
     r"C:\Program Files\Microsoft Visual Studio\18\TeamExplorer"
     r"\Common7\IDE\CommonExtensions\Microsoft"
     r"\TeamFoundation\Team Explorer\witadmin.exe"
 )
 
-export_result = build_export_command(
-    witadmin_path,
-    "http://win-9b0e3epo4lv/XMLLabCollection",
-    "XMLManagementLab",
-    "Issue",
-    r"C:\Issue-current.xml"
-)
-if export_result["success"]:
-    execute_result = execute_command(
-        export_result["program"],
-        export_result["args"],
-        session
-    )
-else:
-    execute_result = export_result
-
-print(execute_result)
 
 def verify(verification_result: dict):
     field_name = verification_result["field_name"]
@@ -417,15 +381,12 @@ def verify(verification_result: dict):
        return {
     "verified": False
      }
+    
 def check_remote_file(session: winrm.Session, remote_path: str):
     script=f'Test-Path "{remote_path}"'
     result = session.run_ps(script)
     return result
 
-check_result = check_remote_file(session, r"C:\Issue-current.xml")
-
-print("Status:", check_result.status_code)
-print("Dosya var mı:", check_result.std_out.decode().strip())
 
 def read_remote_xml(session: winrm.Session, remote_path: str):
     script=rf'''
@@ -433,72 +394,178 @@ def read_remote_xml(session: winrm.Session, remote_path: str):
     [Convert]::ToBase64String($bytes)'''
     result=session.run_ps(script)
     return result
-response = read_remote_xml(session, r"C:\Issue-current.xml")
 
-print("Status:", response.status_code)
-print("Hata:", response.std_err.decode())
-print("Gelen veri uzunluğu:", len(response.std_out))
+def is_xml_response_valid(response):
+    if response.status_code != 0:
+        return False
 
-xml_bytes = base64.b64decode(response.std_out.strip())
+    if not response.std_out.strip():
+        return False
 
-with open("Issue-current.xml", "wb") as e:
-    e.write(xml_bytes)
+    return True
+
+
 
 def main():
+    project_name = "XMLManagementLab"
+    work_item_type = "Issue"
+    field_ref = "Lab.Environment"
+    collection_url = "http://win-9b0e3epo4lv/XMLLabCollection"
+
+    # Dosya yolları
+    remote_xml_path = rf"C:\{work_item_type}-current.xml"
+    local_xml_path = f"{work_item_type}-current.xml"
+    backup_xml_path = f"{work_item_type}-backup-python.xml"
+    preview_xml_path = f"{work_item_type}-preview.xml"
+
+    # Windows Server bağlantısı
+    password = getpass.getpass("Windows şifresi: ")
+
+    session = winrm.Session(
+        f"http://{windows_ip}:5985/wsman",
+        auth=(username, password),
+        transport="ntlm",
+        message_encryption="always"
+    )
+
+    #  XML export
+    export_result = build_export_command(
+        witadmin_path,
+        collection_url,
+        project_name,
+        work_item_type,
+        remote_xml_path
+    )
+
+    if export_result["success"]:
+        execute_result = execute_command(
+            export_result["program"],
+            export_result["args"],
+            session
+        )
+    else:
+        print("Export failed, transaction canceled")
+        return
+
+    if not execute_result["success"]:
+        print("Export failed, transaction canceled")
+        return
+
+    print(execute_result)
+
+    # Remote dosya kontrolü
+    check_result = check_remote_file(
+        session,
+        remote_xml_path
+    )
+
+    print("Status:", check_result.status_code)
+    print("Dosya var mı:", check_result.std_out.decode().strip())
+
+    if (
+        check_result.status_code != 0
+        or check_result.std_out.decode().strip() != "True"
+    ):
+        print("The file is in an uncontrollable state.")
+        return
+
+    #  Windows'taki XML'i oku
+    response = read_remote_xml(
+        session,
+        remote_xml_path
+    )
+
+    print("Status:", response.status_code)
+    print("Hata:", response.std_err.decode())
+    print("Gelen veri uzunluğu:", len(response.std_out))
+
+    if is_xml_response_valid(response):
+        try:
+            xml_bytes = base64.b64decode(
+                response.std_out.strip(),
+                validate=True
+            )
+        except Exception as e:
+            print("Base64 çözme hatası:", e)
+            return
+    else:
+        print("XML could not be read.")
+        return
+
+    #  XML'i Mac'e kaydet
+    with open(local_xml_path, "wb") as e:
+        e.write(xml_bytes)
+
+    #  Alan analizi
     analysis_result = analyze_field_full(
-    "Issue",
-    "Lab.OldSystemCode",
-    "/Users/ilayda/Desktop/Issue-current.xml"
-)
-
+        work_item_type,
+        field_ref,
+        local_xml_path
+    )
     print(analysis_result)
-    cleanup_result = evaluate_cleanup_candidate(analysis_result)
+
+    cleanup_result = evaluate_cleanup_candidate(
+        analysis_result
+    )
     print(cleanup_result)
-    field_report = build_field_report(analysis_result)
+
+    field_report = build_field_report(
+        analysis_result
+    )
     print(field_report)
+
+    #  Backup oluştur
     create_result = create_backup(
-    "/Users/ilayda/Desktop/Issue-current.xml",
-    "/Users/ilayda/Desktop/Issue-backup-python.xml"
-     )
-
+        local_xml_path,
+        backup_xml_path
+    )
     print(create_result)
-    if not create_result["success"]:
-     print("Backup başarısız! XML değişikliği durduruldu.")
-     return
 
+    if not create_result["success"]:
+        print("Backup başarısız! XML değişikliği durduruldu.")
+        return
+
+    #  Alanı UI'dan gizle
     hide_result = hide_field_from_ui(
-    "/Users/ilayda/Desktop/Issue-current.xml",
-    "Lab.OldSystemCode",
-    "/Users/ilayda/Desktop/Issue-preview.xml"
-)
+        local_xml_path,
+        field_ref,
+        preview_xml_path
+    )
+
+    if hide_result.get("status") == "ALREADY_HIDDEN":
+        print("This field is already hidden.")
+        return
 
     print(hide_result)
 
     if not hide_result["success"]:
-      print("Alan gizlenemedi. İşlem durduruldu.")
-      return
+        print("Alan gizlenemedi. İşlem durduruldu.")
+        return
 
+    #  Değişikliği kontrol et
     verify_result = find_field_references(
-    "/Users/ilayda/Desktop/Issue-preview.xml",
-    "Lab.OldSystemCode"
-)
-
+        preview_xml_path,
+        field_ref
+    )
     print(verify_result)
 
-
+    #  XML doğrulama
     validation_result = validate_xml(
-    "/Users/ilayda/Desktop/Issue-preview.xml"
-)
+        preview_xml_path
+    )
     print(validation_result)
+
+    #  Değişiklik önizlemesi
     preview = build_change_preview(
-    analysis_result,
-    verify_result,
-    validation_result,
-    azure_validation=False
-)
+        analysis_result,
+        verify_result,
+        validation_result,
+        azure_validation=False
+    )
 
     print("Preview:", preview)
     print("Sunucuya import yapılmadı.")
+
 
 if __name__ == "__main__":
     main()
