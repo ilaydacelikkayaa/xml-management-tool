@@ -7,6 +7,12 @@ from dotenv import load_dotenv
 import winrm
 import getpass
 import base64
+import logging
+import time
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 windows_ip = "192.168.64.2"
 username = r"WIN-9B0E3EPO4LV\Administrator"
 wiql_url = "http://win-9b0e3epo4lv/XMLLabCollection/_apis/wit/wiql?api-version=7.0"
@@ -16,16 +22,44 @@ token = os.getenv("AZURE_DEVOPS_PAT")
 
 #A
 
-def get_work_item_ids(work_item_type: str):
+def get_work_item_ids(project_name: str, work_item_type: str):
+
+    safe_project_name = escape_wiql_value(project_name)
+    safe_work_item_type = escape_wiql_value(work_item_type)
+
     wiql_body = {
-        "query": f"Select [System.Id] From WorkItems WHERE [System.WorkItemType] = '{work_item_type}'"
+        "query": (
+            "Select [System.Id] From WorkItems "
+            f"WHERE [System.WorkItemType] = '{safe_work_item_type}' "
+            f"AND [System.TeamProject] = '{safe_project_name}'"
+        )
     }
 
-    request = requests.post(
-        auth=("", token),
-        url=wiql_url,
-        json=wiql_body
-    )
+    start = time.perf_counter()
+
+    try:
+        request = requests.post(
+            auth=("", token),
+            url=wiql_url,
+            json=wiql_body,
+            timeout=15
+        )
+
+        logger.info("WIQL HTTP status: %s", request.status_code)
+
+        if request.status_code >= 400:
+            logger.error("WIQL HTTP error: %s", request.status_code)
+            logger.error("WIQL response: %s", request.text[:500])
+
+        request.raise_for_status()
+
+    except requests.exceptions.ReadTimeout:
+        logger.error("WIQL request timed out")
+        raise
+
+    finally:
+        elapsed = time.perf_counter() - start
+        logger.info("WIQL request duration: %.2f seconds", elapsed)
 
     result = request.json()
 
@@ -36,10 +70,12 @@ def get_work_item_ids(work_item_type: str):
 
     return ids
 
-
 def get_work_items(ids: list):
+    
+    if not ids:
+        return []
+    
     id_strings = []
-
     for i in ids:
         id_strings.append(str(i))
 
@@ -52,14 +88,13 @@ def get_work_items(ids: list):
 
     request = requests.get(
         auth=("", token),
-        url=second_url
+        url=second_url,
+        timeout=15
     )
-
+    request.raise_for_status()
     result = request.json()
 
     return result["value"]
-
-
 
 def analyze_work_items(work_items: list, field_ref: str):
     filled = 0
@@ -71,6 +106,14 @@ def analyze_work_items(work_items: list, field_ref: str):
             filled += 1
 
     total = len(work_items)
+    if total==0:
+       return {
+    "field_ref": field_ref,
+    "total": 0,
+    "filled": 0,
+    "empty": 0,
+    "rate": 0
+}
     empty = total - filled
     rate = (filled / total) * 100
 
@@ -82,16 +125,14 @@ def analyze_work_items(work_items: list, field_ref: str):
         "rate": rate
     }
 
-
-def analyze_field(work_item_type: str, field_ref: str):
-    ids = get_work_item_ids(work_item_type)
+def analyze_field(work_item_type: str, field_ref: str,project_name:str):
+    ids = get_work_item_ids(project_name,work_item_type)
 
     work_items = get_work_items(ids)
 
     analysis = analyze_work_items(work_items, field_ref)
 
     return analysis
-
 
 def find_field_references(xml_path: str, field_ref: str):
     field_name = None
@@ -117,9 +158,8 @@ def find_field_references(xml_path: str, field_ref: str):
         "control_count": control_count
     }
 
-
-def analyze_field_full(work_item_type: str, field_ref: str, xml_path: str):
-    usage = analyze_field(work_item_type, field_ref)
+def analyze_field_full(work_item_type: str, field_ref: str, xml_path: str,project_name:str):
+    usage = analyze_field(work_item_type, field_ref,project_name)
 
     xml_info = find_field_references(
         xml_path,
@@ -404,7 +444,9 @@ def is_xml_response_valid(response):
 
     return True
 
-
+def escape_wiql_value(value:str)->str:
+    result=value.replace("'","''")
+    return result
 
 def main():
     project_name = "XMLManagementLab"
@@ -500,7 +542,8 @@ def main():
     analysis_result = analyze_field_full(
         work_item_type,
         field_ref,
-        local_xml_path
+        local_xml_path,
+        project_name
     )
     print(analysis_result)
 
