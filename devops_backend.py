@@ -9,6 +9,10 @@ import getpass
 import base64
 import logging
 import time
+from dateutil.relativedelta import relativedelta
+from datetime import date
+from uuid import uuid4
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -17,12 +21,15 @@ windows_ip = "192.168.64.2"
 username = r"WIN-9B0E3EPO4LV\Administrator"
 wiql_url = "http://win-9b0e3epo4lv/XMLLabCollection/_apis/wit/wiql?api-version=7.0"
 
+
 load_dotenv()
+server_url = os.getenv("AZURE_DEVOPS_SERVER_URL")
 token = os.getenv("AZURE_DEVOPS_PAT")
+
 
 #A
 
-def get_work_item_ids(project_name: str, work_item_type: str):
+def get_work_item_ids(project_name: str, work_item_type: str,start_date: date | None = None):
 
     safe_project_name = escape_wiql_value(project_name)
     safe_work_item_type = escape_wiql_value(work_item_type)
@@ -31,9 +38,11 @@ def get_work_item_ids(project_name: str, work_item_type: str):
         "query": (
             "Select [System.Id] From WorkItems "
             f"WHERE [System.WorkItemType] = '{safe_work_item_type}' "
-            f"AND [System.TeamProject] = '{safe_project_name}'"
+            f"AND [System.TeamProject] = '{safe_project_name}' "
+            f" AND [System.CreatedDate] >= '{start_date}'"
         )
     }
+    logger.info("WIQL query: %s", wiql_body["query"])
 
     start = time.perf_counter()
 
@@ -125,8 +134,13 @@ def analyze_work_items(work_items: list, field_ref: str):
         "rate": rate
     }
 
-def analyze_field(work_item_type: str, field_ref: str,project_name:str):
-    ids = get_work_item_ids(project_name,work_item_type)
+def analyze_field(work_item_type: str, field_ref: str,project_name:str,start_date: date | None = None
+):
+    
+    if start_date is None:
+        start_date = date.today() - relativedelta(months=6)
+
+    ids = get_work_item_ids(project_name,work_item_type,start_date)
 
     work_items = get_work_items(ids)
 
@@ -171,8 +185,6 @@ def analyze_field_full(work_item_type: str, field_ref: str, xml_path: str,projec
         "xml_info": xml_info
     }
 
-#B
-
 def evaluate_cleanup_candidate(analysis: dict):
     rate = analysis["usage"]["rate"]
 
@@ -206,7 +218,6 @@ def build_field_report(analysis: dict):
         "candidate": candidate
     }
 
-#C
 def create_backup(xml_path: str, backup_path: str):
     try:
         shutil.copy2(xml_path, backup_path)
@@ -313,20 +324,6 @@ def build_change_preview(
     }
 
 
-
-''' Temporary: witadmin validation was performed manually on Windows VM
-azure_validation = True
-
-preview = build_change_preview(
-    analysis_result,
-    verify_result,
-    validation_result,
-    azure_validation
-)
-
-print(preview)
-'''
-
 def can_apply_change(preview: dict, confirmed: bool):
     technical_ready = preview["ready_to_apply"]
 
@@ -429,11 +426,15 @@ def check_remote_file(session: winrm.Session, remote_path: str):
 
 
 def read_remote_xml(session: winrm.Session, remote_path: str):
+    
     script=rf'''
     $bytes = [System.IO.File]::ReadAllBytes("{remote_path}")
     [Convert]::ToBase64String($bytes)'''
     result=session.run_ps(script)
-    return result
+    if result.status_code !=0 :
+        raise RuntimeError("Uzak sunucudaki XML okunamadı")
+    xml_bytes = base64.b64decode(result.std_out.strip(), validate=True)
+    return xml_bytes
 
 def is_xml_response_valid(response):
     if response.status_code != 0:
@@ -447,6 +448,87 @@ def is_xml_response_valid(response):
 def escape_wiql_value(value:str)->str:
     result=value.replace("'","''")
     return result
+
+def list_xml_fields(xml_bytes:bytes):
+    root = ET.fromstring(xml_bytes)
+    fields=[]
+    work_item_type = root.find("{*}WORKITEMTYPE")
+
+    if work_item_type is None:
+      raise ValueError("WORKITEMTYPE bölümü bulunamadı") 
+    fields_section = work_item_type.find("{*}FIELDS")
+
+    if fields_section is None:
+      raise ValueError("FIELDS bölümü bulunamadı")
+    for field in fields_section.findall("{*}FIELD"):
+      name=field.get("name")
+      refname=field.get("refname")
+      field_type=field.get("type")
+      if name is None or refname is None or field_type is None:
+       raise ValueError(f"Eksik FIELD bilgisi: {field.attrib}")
+      field_info={
+        "name":name,
+        "refname":refname,
+        "field_type":field_type
+    }
+      fields.append(field_info)
+    return fields
+
+def get_project_xml(
+    session: winrm.Session,
+    collection_name: str,
+    project_name: str,
+    work_item_type: str
+):
+    collection_url = f"{server_url.rstrip('/')}/{collection_name}"
+    remote_xml_path = rf"C:\Temp\wit-{uuid4().hex}.xml"
+    export_result = build_export_command(
+        witadmin_path,
+        collection_url,
+        project_name,
+        work_item_type,
+        remote_xml_path
+    )
+    if not export_result["success"]:
+      raise RuntimeError("Export komutu hazırlanamadı")
+
+    try:
+      execute_result = execute_command(
+      export_result["program"],
+      export_result["args"],
+      session
+    )
+      if not execute_result["success"]:
+       raise RuntimeError(
+            f"XML export başarısız: {execute_result.get('stderr') or execute_result.get('error')}"
+        )
+      xml_bytes = read_remote_xml(session, remote_xml_path)
+      return xml_bytes
+
+    finally:
+      try:
+        cleanup_result = session.run_cmd(
+        "cmd.exe",
+        ["/c", "del", "/q", remote_xml_path]
+          )
+        if cleanup_result.status_code != 0:
+          logger.warning("Geçici XML dosyası temizlenemedi")
+      except Exception:
+        logger.warning("Geçici XML temizleme işlemi başarısız")
+
+def create_winrm_session():
+        windows_ip = os.getenv("WINRM_HOST")
+        username = os.getenv("WINRM_USERNAME")
+        password = os.getenv("WINRM_PASSWORD")
+        if not all([windows_ip, username, password]):
+         raise RuntimeError("WinRM bağlantı bilgileri eksik")
+        session = winrm.Session(
+        f"http://{windows_ip}:5985/wsman",
+        auth=(username, password),
+        transport="ntlm",
+        message_encryption="always"
+    )
+        return session
 
 def main():
     project_name = "XMLManagementLab"
@@ -512,31 +594,10 @@ def main():
         return
 
     #  Windows'taki XML'i oku
-    response = read_remote_xml(
-        session,
-        remote_xml_path
-    )
+    xml_bytes = read_remote_xml(session, remote_xml_path)
 
-    print("Status:", response.status_code)
-    print("Hata:", response.std_err.decode())
-    print("Gelen veri uzunluğu:", len(response.std_out))
-
-    if is_xml_response_valid(response):
-        try:
-            xml_bytes = base64.b64decode(
-                response.std_out.strip(),
-                validate=True
-            )
-        except Exception as e:
-            print("Base64 çözme hatası:", e)
-            return
-    else:
-        print("XML could not be read.")
-        return
-
-    #  XML'i Mac'e kaydet
-    with open(local_xml_path, "wb") as e:
-        e.write(xml_bytes)
+    with open(local_xml_path, "wb") as f:
+      f.write(xml_bytes)
 
     #  Alan analizi
     analysis_result = analyze_field_full(
@@ -611,4 +672,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    with open("Issue-current.xml", "rb") as f:
+        xml_bytes = f.read()
+
+    result = list_xml_fields(xml_bytes)
+    print("Toplam alan:", len(result))
+    print("İlk alan:", result[0])
