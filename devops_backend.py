@@ -2,7 +2,6 @@ import requests
 import os
 import xml.etree.ElementTree as ET
 import shutil
-import subprocess
 from dotenv import load_dotenv
 import winrm
 import getpass
@@ -12,7 +11,9 @@ import time
 from dateutil.relativedelta import relativedelta
 from datetime import date
 from uuid import uuid4
-
+import json
+import tempfile
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -220,6 +221,11 @@ def build_field_report(analysis: dict):
 
 def create_backup(xml_path: str, backup_path: str):
     try:
+        if os.path.exists(backup_path):
+            return {
+                "success": False,
+                "message": "Backup file already exists"
+            }
         shutil.copy2(xml_path, backup_path)
 
         return {
@@ -474,6 +480,20 @@ def list_xml_fields(xml_bytes:bytes):
       fields.append(field_info)
     return fields
 
+def ensure_remote_directory(session: winrm.Session, directory: str):
+    script = r'''
+    $path = "C:\Temp"
+
+    if (-not (Test-Path -LiteralPath $path)) {
+        New-Item -ItemType Directory -Path $path -Force | Out-Null
+    }
+    '''
+
+    result = session.run_ps(script)
+
+    if result.status_code != 0:
+        raise RuntimeError("Windows geçici klasörü oluşturulamadı")
+    
 def get_project_xml(
     session: winrm.Session,
     collection_name: str,
@@ -482,6 +502,7 @@ def get_project_xml(
 ):
     collection_url = f"{server_url.rstrip('/')}/{collection_name}"
     remote_xml_path = rf"C:\Temp\wit-{uuid4().hex}.xml"
+    ensure_remote_directory(session,remote_xml_path)
     export_result = build_export_command(
         witadmin_path,
         collection_url,
@@ -530,6 +551,183 @@ def create_winrm_session():
     )
         return session
 
+import os
+import json
+import winrm
+
+
+def get_collections():
+    # 1. Bağlantı bilgilerini al
+    windows_ip = os.getenv("WINRM_HOST")
+    username = os.getenv("WINRM_USERNAME")
+    password = os.getenv("WINRM_PASSWORD")
+    server_url = os.getenv("AZURE_DEVOPS_SERVER_URL")
+
+    if not all([windows_ip, username, password, server_url]):
+        raise RuntimeError("Azure DevOps veya WinRM bağlantı bilgileri eksik")
+
+    session = winrm.Session(
+        f"http://{windows_ip}:5985/wsman",
+        auth=(username, password),
+        transport="ntlm",
+        message_encryption="always"
+    )
+
+    powershell_script = r"""
+$ErrorActionPreference = "Stop"
+
+$dllPath = "C:\Program Files\Azure DevOps Server 2022\Application Tier\Web Services\bin\Microsoft.TeamFoundation.Client.dll"
+
+$serverUrl = __SERVER_URL__
+
+Add-Type -Path $dllPath
+
+$server = [Microsoft.TeamFoundation.Client.TfsConfigurationServerFactory]::GetConfigurationServer([Uri]$serverUrl)
+
+$server.EnsureAuthenticated()
+
+$types = [System.Guid[]]@(
+    [Microsoft.TeamFoundation.Framework.Common.CatalogResourceTypes]::ProjectCollection
+)
+
+$collections = $server.CatalogNode.QueryChildren(
+    $types,
+    $false,
+    [Microsoft.TeamFoundation.Framework.Common.CatalogQueryOptions]::None
+)
+
+$names = @(
+    $collections | ForEach-Object {
+        $_.Resource.DisplayName
+    }
+)
+
+ConvertTo-Json -InputObject $names -Compress
+"""
+
+    server_url_ps = "'" + server_url.replace("'", "''") + "'"
+    powershell_script = powershell_script.replace(
+        "__SERVER_URL__",
+        server_url_ps
+    )
+
+    result = session.run_ps(powershell_script)
+
+    if result.status_code != 0:
+        error_message = result.std_err.decode(
+            "utf-8",
+            errors="replace"
+        )
+        raise RuntimeError(error_message)
+
+    output = result.std_out.decode(
+        "utf-8-sig",
+        errors="replace"
+    ).strip()
+
+    if not output:
+        raise RuntimeError("Collection sorgusu boş çıktı döndürdü")
+
+    return json.loads(output)
+
+def get_project(collection_name:str):
+        token = os.getenv("AZURE_DEVOPS_PAT")
+        url = f"{server_url.rstrip('/')}/{collection_name}/_apis/projects?api-version=7.0"
+        response=requests.get(
+            url=url,
+            auth=("", token),
+            timeout=15
+        )
+        response.raise_for_status()
+        return response.json()
+
+def get_work_item_types(collection_name: str, project_name: str):
+    token=os.getenv("AZURE_DEVOPS_PAT")
+    if not token or not server_url:
+     raise RuntimeError("Azure DevOps bağlantı bilgileri eksik")
+    url = f"{server_url.rstrip('/')}/{collection_name}/{project_name}/_apis/wit/workitemtypes?api-version=7.0"
+    response=requests.get(
+        url=url,
+        auth=("", token),
+        timeout=15
+    )
+
+    response.raise_for_status()
+    return response.json()
+
+def preview_hide_field(
+    session: winrm.Session,
+    collection_name: str,
+    project_name: str,
+    work_item_type: str,
+    field_ref: str
+):
+    xml_bytes = get_project_xml(
+        session,
+        collection_name,
+        project_name,
+        work_item_type
+    )
+    if not xml_bytes:
+        raise RuntimeError("Azure DevOps'tan boş XML döndü")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+
+        original_path = Path(temp_dir) / "original.xml"
+        backup_path = Path(temp_dir) / "backup.xml"
+        preview_path = Path(temp_dir) / "preview.xml"
+
+        with open(original_path, "wb") as f:
+            f.write(xml_bytes)
+
+        backup_result = create_backup(
+            str(original_path),
+            str(backup_path)
+        )
+
+        if not backup_result["success"]:
+            raise RuntimeError("Backup oluşturulamadı")
+
+        hide_result = hide_field_from_ui(
+            str(original_path),
+            field_ref,
+            str(preview_path)
+        )
+        print("HIDE RESULT:", hide_result)
+        print("PREVIEW PATH:", preview_path)
+        print("PREVIEW EXISTS:", preview_path.exists())
+
+        if hide_result.get("status") == "ALREADY_HIDDEN":
+         return {
+        "success": True,
+        "status": "ALREADY_HIDDEN",
+        "field_ref": field_ref,
+        "removed_controls": 0,
+        "message": "Bu alan zaten gizli. Herhangi bir değişiklik yapılmadı."
+    }
+
+        if not hide_result["success"]:
+         return hide_result
+
+        if not preview_path.exists():
+         raise RuntimeError("Preview XML oluşturulamadı")
+
+        validation_result = validate_xml(str(preview_path))
+
+        if not validation_result["valid"]:
+            raise RuntimeError("Preview XML geçersiz")
+
+        with open(preview_path, "r", encoding="utf-8") as f:
+            preview_xml = f.read()
+
+        return {
+            "success": True,
+            "field_ref": field_ref,
+            "removed_controls": hide_result["removed_controls"],
+            "preview_xml": preview_xml,
+            "message": "Preview oluşturuldu. Azure DevOps'a uygulanmadı."
+        }
+    
 def main():
     project_name = "XMLManagementLab"
     work_item_type = "Issue"
