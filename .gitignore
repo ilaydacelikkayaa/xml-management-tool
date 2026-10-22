@@ -10,3 +10,58 @@ Issue-backup.xml
 Issue-backup-python.xml
 *.log
 .DS_Store
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Generated XML files
+*.xml
+!frontend/**/*.xml
+
+# Runtime data
+backups/
+previews/
+
+# Local development
+.vscode/
+node_modules/
+frontend/node_modules/
+frontend/dist/
+.pytest_cache/
+.coverage
+
+# Debug outputs
+xml-diff.txt
+xml-differences.txt
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Generated XML files
+*.xml
+!frontend/**/*.xml
+
+# Runtime data
+backups/
+previews/
+
+# Local development
+.vscode/
+node_modules/
+frontend/node_modules/
+frontend/dist/
+.pytest_cache/
+.coverage
+
+# Debug outputs
+xml-diff.txt
+xml-differences.txt
+
+# Test files
+test_*.py
+*_test.py
+check_backup_retention.py

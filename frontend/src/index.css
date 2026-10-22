@@ -1,0 +1,83 @@
+:root {
+  font-family: Inter, Arial, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+
+/* Unified Primary Buttons */
+
+.xml-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+
+  width: 230px;
+  height: 54px;
+  min-height: 54px;
+  max-width: 100%;
+  padding: 0 24px;
+
+  background-color: #2563eb;
+  color: #ffffff;
+
+  border: none;
+  border-radius: 12px;
+
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.18);
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+
+.xml-action-btn:hover:not(:disabled) {
+  background-color: #1d4ed8;
+  transform: translateY(-2px);
+}
+
+.xml-action-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.xml-action-btn:focus-visible {
+  outline: 3px solid #93c5fd;
+  outline-offset: 3px;
+}
+
+/* Align all three buttons */
+
+.workspace-actions,
+.check-apply-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+
+.field-operation-form>.xml-action-btn {
+  grid-column: 1 / -1;
+  justify-self: end;
+  align-self: end;
+}
+
+@media (max-width: 480px) {
+  .xml-action-btn {
+    width: 100%;
+  }
+}

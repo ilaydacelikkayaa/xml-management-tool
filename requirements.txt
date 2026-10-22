@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pydantic
+requests
+requests-ntlm
+python-dotenv
+pywinrm
+python-dateutil
