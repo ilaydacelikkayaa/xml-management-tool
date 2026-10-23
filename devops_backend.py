@@ -783,71 +783,92 @@ def add_field_to_form(root, field_ref: str, field_name: str):
         return element.tag.split("}")[-1]
 
     form = next(
-        (element for element in root.iter() if tag_name(element) == "FORM"),
+        (e for e in root.iter() if tag_name(e) == "FORM"),
         None,
     )
-
     if form is None:
-        raise ValueError("XML içinde FORM bölümü bulunamadı.")
+        raise ValueError("XML içinde FORM bulunamadı.")
 
     added_controls = 0
+    existing_controls = 0
+    supported_layouts = 0
 
     for layout_name in ("Layout", "WebLayout"):
         layout = next(
-            (child for child in form if tag_name(child) == layout_name),
+            (e for e in form if tag_name(e) == layout_name),
             None,
         )
-
         if layout is None:
-            raise ValueError(f"{layout_name} bulunamadı.")
+            continue
 
-        planning_group = next(
-            (
-                element
-                for element in layout.iter()
-                if tag_name(element) == "Group" and element.get("Label") == "Planning"
-            ),
-            None,
+        supported_layouts += 1
+
+        if any(
+            tag_name(e) == "Control" and e.get("FieldName") == field_ref
+            for e in layout.iter()
+        ):
+            existing_controls += 1
+            continue
+
+        groups = [e for e in layout.iter() if tag_name(e) == "Group"]
+
+        def group_is_safe(group):
+            controls = [e for e in group.iter() if tag_name(e) == "Control"]
+
+            # Özel kontrol barındıran grupları kullanma.
+            return all(c.get("Type") == "FieldControl" for c in controls)
+
+        safe_groups = [group for group in groups if group_is_safe(group)]
+
+        # Önce Planning, ardından diğer normal alan grupları.
+        safe_groups.sort(
+            key=lambda group: (
+                group.get("Label") != "Planning",
+                group.get("Label") != "Bug Details",
+            )
         )
 
-        if planning_group is None:
-            raise ValueError(f"{layout_name} içinde Planning grubu bulunamadı.")
+        target = None
 
-        if layout_name == "Layout":
-            target = next(
-                (
-                    element
-                    for element in planning_group.iter()
-                    if tag_name(element) == "Column"
-                ),
-                None,
-            )
-        else:
-            target = planning_group
+        for group in safe_groups:
+            if layout_name == "Layout":
+                target = next(
+                    (e for e in group.iter() if tag_name(e) == "Column"),
+                    None,
+                )
+            else:
+                target = group
+
+            if target is not None:
+                break
 
         if target is None:
-            raise ValueError(
-                f"{layout_name} içinde Control yerleştirilecek alan bulunamadı."
-            )
+            raise ValueError(f"{layout_name} içinde güvenli Group bulunamadı.")
 
         namespace = target.tag.rsplit("}", 1)[0] + "}" if "}" in target.tag else ""
 
-        control_attributes = {
+        attributes = {
             "FieldName": field_ref,
             "Type": "FieldControl",
             "Label": field_name,
         }
 
         if layout_name == "Layout":
-            control_attributes["LabelPosition"] = "Left"
+            attributes["LabelPosition"] = "Left"
 
         ET.SubElement(
             target,
             f"{namespace}Control",
-            control_attributes,
+            attributes,
         )
 
         added_controls += 1
+
+    if supported_layouts == 0:
+        raise ValueError("FORM içinde Layout veya WebLayout bulunamadı.")
+
+    if added_controls == 0 and existing_controls == 0:
+        raise ValueError("Alan hiçbir layout içine eklenemedi.")
 
     return added_controls
 
@@ -1236,11 +1257,12 @@ def update_field_in_xml(
 
             for control in root.iter():
                 if (
-                    control.tag.split("}")[-1] == "Control"
+                    local_name(control) == "Control"
                     and control.get("FieldName") == field_ref
-                    and control.get("Label") == old_name
+                    and control.get("Label") is not None
                 ):
                     control.set("Label", new_field_name)
+
     update_field_rules(
         field,
         is_required=is_required,
@@ -1267,8 +1289,11 @@ def update_field_in_xml(
 
 
 def remove_field_from_xml(xml_path: str, field_ref: str, output_path: str):
+    if not field_ref or not field_ref.strip():
+        raise ValueError("Field reference name boş olamaz.")
+
     if Path(xml_path).resolve() == Path(output_path).resolve():
-        raise ValueError("Orijinal XML dosyasının üzerine yazılamaz")
+        raise ValueError("Orijinal XML dosyasının üzerine yazılamaz.")
 
     tree = ET.parse(xml_path)
     root = tree.getroot()
@@ -1276,77 +1301,109 @@ def remove_field_from_xml(xml_path: str, field_ref: str, output_path: str):
     fields_element = find_fields_element(root)
 
     if fields_element is None:
-        raise ValueError("XML içinde FIELDS bölümü bulunamadı")
+        raise ValueError("XML içinde FIELDS bölümü bulunamadı.")
 
-    target_field = None
-
-    for field in fields_element:
-        if local_tag(field) != "FIELD":
-            continue
-
-        if field.get("refname") == field_ref:
-            target_field = field
-            break
-
-    if target_field is None:
-        raise ValueError("Silinmek istenen alan bulunamadı")
-
-    # Remove FIELD references from form layouts first.
-    removed_controls = 0
-
-    for parent in root.iter():
-        for child in list(parent):
-            if local_tag(child) == "Control" and child.get("FieldName") == field_ref:
-                parent.remove(child)
-                removed_controls += 1
-
-    logger.info(
-        "REMOVE FIELD CONTROLS | field=%s | removed=%s",
-        field_ref,
-        removed_controls,
+    target_field = next(
+        (
+            field
+            for field in fields_element
+            if local_tag(field) == "FIELD" and field.get("refname") == field_ref
+        ),
+        None,
     )
 
+    if target_field is None:
+        raise ValueError(f"Alan bulunamadı: {field_ref}")
+
+    # Önce diğer XML öğelerindeki bağımlılıkları kontrol et.
+    # FORM kontrolleri Remove sırasında kaldırılabilir.
     dependencies = []
 
     for element in root.iter():
         if element is target_field:
             continue
 
+        tag = local_tag(element)
+
+        if tag == "Control" and element.get("FieldName") == field_ref:
+            continue
+
         for attribute_name, attribute_value in element.attrib.items():
             if field_ref in attribute_value:
                 dependencies.append(
                     {
-                        "element": local_tag(element),
+                        "element": tag,
                         "attribute": attribute_name,
                         "value": attribute_value,
                     }
                 )
 
         if element.text and field_ref in element.text:
-            dependencies.append({"element": local_tag(element), "location": "text"})
-    logger.info(
-        "REMOVE FIELD DEPENDENCIES | field=%s | dependencies=%s",
-        field_ref,
-        dependencies,
-    )
+            dependencies.append(
+                {
+                    "element": tag,
+                    "location": "text",
+                }
+            )
+
     if dependencies:
         return {
             "success": False,
             "action": "REMOVE_FIELD",
             "field_ref": field_ref,
-            "message": "Alan XML içinde başka yerlerde kullanılıyor",
+            "message": "Alan başka XML öğelerinde kullanılıyor. Silme engellendi.",
             "dependencies": dependencies,
         }
 
+    # FORM altındaki Layout / WebLayout kontrollerini kaldır.
+    removed_controls = remove_field_controls(root, field_ref)
+
+    # FIELD tanımını kaldır.
     fields_element.remove(target_field)
 
-    tree.write(output_path, encoding="utf-8", xml_declaration=True)
+    # Çıktıda referans kalmadığını kontrol et.
+    remaining_references = []
+
+    for element in root.iter():
+        for attribute_name, value in element.attrib.items():
+            if field_ref in value:
+                remaining_references.append(
+                    {
+                        "element": local_tag(element),
+                        "attribute": attribute_name,
+                    }
+                )
+
+        if element.text and field_ref in element.text:
+            remaining_references.append(
+                {
+                    "element": local_tag(element),
+                    "location": "text",
+                }
+            )
+
+    if remaining_references:
+        return {
+            "success": False,
+            "action": "REMOVE_FIELD",
+            "field_ref": field_ref,
+            "message": "Silme sonrası alan referansları kaldı.",
+            "dependencies": remaining_references,
+        }
+
+    tree.write(
+        output_path,
+        encoding="utf-8",
+        xml_declaration=True,
+    )
 
     return {
         "success": True,
         "action": "REMOVE_FIELD",
         "field_ref": field_ref,
+        "removed_controls": removed_controls,
         "output_path": output_path,
+        "message": "Alan ve form kontrolleri XML'den kaldırıldı.",
     }
 
 
@@ -1493,20 +1550,27 @@ def change_field_name(
         for_witadmin=True,
     )
 
-    result = execute_command(
-        witadmin,
-        [
-            "changefield",
-            f"/collection:{collection_url}",
-            f"/n:{field_ref}",
-            f"/name:{new_name}",
-            "/noprompt",
-        ],
-        session,
-    )
+    ps_script = f"""
+$ErrorActionPreference = 'Stop'
+$witadmin = '{witadmin.replace("'", "''")}'
+$collection = '{collection_url.replace("'", "''")}'
+$field = '{field_ref.replace("'", "''")}'
+$newName = '{new_name.replace("'", "''")}'
 
-    if not result["success"]:
-        raise RuntimeError("Alan adı değiştirilemedi: " + result.get("stderr", ""))
+& $witadmin changefield "/collection:$collection" "/n:$field" "/name:$newName" /noprompt
+
+if ($LASTEXITCODE -ne 0) {{
+    exit 1
+}}
+"""
+
+    result = session.run_ps(ps_script)
+
+    stdout = result.std_out.decode(errors="replace").strip()
+    stderr = result.std_err.decode(errors="replace").strip()
+
+    if result.status_code != 0 or "TF212000" in stderr:
+        raise RuntimeError("Alan adı değiştirilemedi: " + (stderr or stdout))
 
     return {
         "success": True,
@@ -1830,9 +1894,7 @@ def save_global_list_preview(
 def import_global_list(session, collection_name: str, xml_bytes: bytes):
     """
     GlobalList XML'ini Azure DevOps Server'a import eder.
-
-    DİKKAT: Bu fonksiyon sunucu verisini değiştirir.
-    Yalnızca doğrulama ve onay kontrollerinden sonra çağrılmalıdır.
+    XML, WinRM üzerinden küçük parçalar halinde aktarılır.
     """
 
     if not xml_bytes:
@@ -1844,59 +1906,108 @@ def import_global_list(session, collection_name: str, xml_bytes: bytes):
         raise ValueError("Geçersiz GlobalList XML'i")
 
     collection_url = get_collection_url(collection_name, for_witadmin=True)
-
     witadmin_exe = find_witadmin_path(session)
 
     remote_path = rf"C:\Windows\Temp\globallists-{uuid4().hex}.xml"
 
-    xml_base64 = base64.b64encode(xml_bytes).decode("ascii")
+    def run_checked(script, step="unknown"):
+        result = session.run_ps(script)
+
+        stdout = result.std_out.decode("utf-8-sig", errors="replace")
+        stderr = result.std_err.decode("utf-8-sig", errors="replace")
+
+        if result.status_code != 0:
+            raise RuntimeError(
+                f"GlobalList işlemi başarısız [{step}]: " f"{stderr or stdout}"
+            )
+
+        return stdout
 
     ps_path = remote_path.replace("'", "''")
     ps_url = collection_url.replace("'", "''")
     ps_exe = witadmin_exe.replace("'", "''")
 
-    script = f"""
-    $ErrorActionPreference = 'Stop'
+    try:
+        # 1. Sunucuda geçici dosya oluştur
+        run_checked(f"[System.IO.File]::WriteAllBytes('{ps_path}', [byte[]]@())")
 
-    $path = '{ps_path}'
-    $witadmin = '{ps_exe}'
-    $collection = '{ps_url}'
+        # 2. XML'i küçük parçalar halinde aktar
+        chunk_size = 512
 
-    try {{
-        $bytes = [Convert]::FromBase64String('{xml_base64}')
-        [System.IO.File]::WriteAllBytes($path, $bytes)
+        for offset in range(0, len(xml_bytes), chunk_size):
+            chunk = xml_bytes[offset : offset + chunk_size]
+            encoded = base64.b64encode(chunk).decode("ascii")
 
-        $output = & $witadmin importgloballist `
-            "/collection:$collection" `
-            "/f:$path" 2>&1
+            script = f"""
+            $bytes = [Convert]::FromBase64String('{encoded}')
+            $stream = [System.IO.File]::Open(
+                '{ps_path}',
+                [System.IO.FileMode]::Append,
+                [System.IO.FileAccess]::Write
+            )
+            try {{
+                $stream.Write($bytes, 0, $bytes.Length)
+            }}
+            finally {{
+                $stream.Dispose()
+            }}
+            """
+
+            run_checked(script, step=f"XML aktarımı offset={offset}")
+
+        # 3. Dosyanın doğru aktarıldığını kontrol et
+        expected_hash = hashlib.sha256(xml_bytes).hexdigest()
+
+        verify_script = f"""
+        $hash = (Get-FileHash -LiteralPath '{ps_path}' -Algorithm SHA256).Hash
+        Write-Output $hash
+        """
+
+        actual_hash = run_checked(verify_script).strip().lower()
+
+        if actual_hash != expected_hash:
+            raise RuntimeError(
+                "GlobalList XML aktarımı doğrulanamadı: SHA256 uyuşmuyor."
+            )
+
+        # 4. GlobalList import
+        import_script = f"""
+        $ErrorActionPreference = 'Stop'
+
+        $output = & '{ps_exe}' importgloballist `
+            '/collection:{ps_url}' `
+            '/f:{ps_path}' 2>&1
 
         if ($LASTEXITCODE -ne 0) {{
             throw "GlobalList import failed: $output"
         }}
 
         Write-Output "IMPORT_SUCCESS"
-    }}
-    finally {{
-        if (Test-Path -LiteralPath $path) {{
-            Remove-Item -LiteralPath $path -Force
+        """
+
+        stdout = run_checked(import_script)
+
+        if "IMPORT_SUCCESS" not in stdout:
+            raise RuntimeError(f"GlobalList import doğrulanamadı: {stdout}")
+
+        return {
+            "success": True,
+            "collection_name": collection_name,
+            "message": "GlobalList import komutu başarıyla tamamlandı.",
+        }
+
+    finally:
+        # 5. Geçici dosyayı temizle
+        cleanup_script = f"""
+        if (Test-Path -LiteralPath '{ps_path}') {{
+            Remove-Item -LiteralPath '{ps_path}' -Force
         }}
-    }}
-    """
+        """
 
-    result = session.run_ps(script)
-
-    stdout = result.std_out.decode("utf-8-sig", errors="replace")
-
-    stderr = result.std_err.decode("utf-8-sig", errors="replace")
-
-    if result.status_code != 0 or "IMPORT_SUCCESS" not in stdout:
-        raise RuntimeError(f"GlobalList import başarısız: {stderr or stdout}")
-
-    return {
-        "success": True,
-        "collection_name": collection_name,
-        "message": "GlobalList import komutu başarıyla tamamlandı.",
-    }
+        try:
+            run_checked(cleanup_script)
+        except Exception:
+            pass
 
 
 def import_work_item_type(

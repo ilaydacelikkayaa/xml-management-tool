@@ -2,8 +2,10 @@
 import { useState, useEffect } from 'react'
 import { createPortal } from "react-dom";
 
-function GlobalLists() {
-    const [collectionName, setCollectionName] = useState('XMLLabCollection')
+function GlobalLists({ selectedCollection }) {
+    const [collectionName, setCollectionName] = useState(
+        selectedCollection || 'XMLLabCollection'
+    )
     const [globalLists, setGlobalLists] = useState([])
     const [listName, setListName] = useState('')
     const [configOpen, setConfigOpen] = useState(true)
@@ -89,6 +91,11 @@ function GlobalLists() {
             setLoading(false)
         }
     }
+    useEffect(() => {
+        if (selectedCollection) {
+            setCollectionName(selectedCollection)
+        }
+    }, [selectedCollection])
     useEffect(() => {
         if (!collectionName) return;
 
@@ -308,6 +315,9 @@ function GlobalLists() {
                                 >
                                     <option value="XMLLabCollection">
                                         XMLLabCollection
+                                    </option>
+                                    <option value="XMLTestCollection">
+                                        XMLTestCollection
                                     </option>
                                 </select>
                             </div>

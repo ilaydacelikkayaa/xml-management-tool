@@ -5,6 +5,8 @@ function XmlFields({ selectedCollection }) {
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState('')
     const [searchTerm, setSearchTerm] = useState('')
+    const [collections, setCollections] = useState([]);
+    const [collectionsError, setCollectionsError] = useState('');
     const [projects, setProjects] = useState([]);
     const [selectedProjects, setSelectedProjects] = useState([]);
     const [selectedWit, setSelectedWit] = useState('')
@@ -51,6 +53,47 @@ function XmlFields({ selectedCollection }) {
     const [applyLoading, setApplyLoading] = useState(false)
     const [applyResult, setApplyResult] = useState(null)
     const [applyError, setApplyError] = useState('')
+    useEffect(() => {
+        let cancelled = false;
+
+        async function loadCollections() {
+            try {
+                const response = await fetch('/api/collections');
+
+                if (!response.ok) {
+                    throw new Error('Collections could not be loaded.');
+                }
+
+                const data = await response.json();
+
+                if (!cancelled) {
+                    const items = Array.isArray(data) ? data : [];
+                    setCollections(items);
+                    setCollectionsError('');
+
+                    setCollectionName(current => {
+                        const preferred = selectedCollection || current;
+
+                        if (preferred && items.includes(preferred)) {
+                            return preferred;
+                        }
+
+                        return items[0] || '';
+                    });
+                }
+            } catch (error) {
+                if (!cancelled) {
+                    setCollectionsError(error.message);
+                }
+            }
+        }
+
+        loadCollections();
+
+        return () => {
+            cancelled = true;
+        };
+    }, []);
     useEffect(() => {
         if (selectedCollection) {
             setCollectionName(selectedCollection)
@@ -809,14 +852,17 @@ function XmlFields({ selectedCollection }) {
                             value={collectionName}
                             onChange={(event) => setCollectionName(event.target.value)}
                         >
-                            <option value="XMLLabCollection">
-                                XMLLabCollection
-                            </option>
-
-                            <option value="DefaultCollection">
-                                DefaultCollection
-                            </option>
+                            {collections.map(collection => (
+                                <option key={collection} value={collection}>
+                                    {collection}
+                                </option>
+                            ))}
                         </select>
+
+                        {collectionsError && (
+                            <p role="alert">{collectionsError}</p>
+                        )}
+
                     </div>
 
                     <div className="collection-selector">

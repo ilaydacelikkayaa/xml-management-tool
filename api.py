@@ -318,7 +318,9 @@ def preview_remove_field(request: RemoveFieldRequest):
                 output_path=str(preview_path),
             )
 
-            if not result["success"]:
+            stderr = (result.get("stderr") or "").strip()
+
+            if not result["success"] or re.search(r"\bTF\d{5}\s*:", stderr):
                 return result
 
             preview_xml = preview_path.read_bytes()
@@ -748,18 +750,12 @@ def apply_global_list(request: GlobalListApplyRequest):
 
         collection_name = metadata["collection_name"]
 
-        # İlk gerçek import testini yalnızca test collection'ında yapıyoruz.
-        # Yalnızca izin verilen collection'lara gerçek import yapılabilir.
-        allowed_collections = {
-            name.strip()
-            for name in os.getenv("ALLOWED_IMPORT_COLLECTIONS", "").split(",")
-            if name.strip()
-        }
-
-        if collection_name not in allowed_collections:
+        # Collection seçimi dinamik olarak yapılır.
+        # Import işlemi öncesinde collection adı doğrulanır.
+        if not collection_name or not collection_name.strip():
             raise HTTPException(
-                status_code=403,
-                detail="Bu collection için import izni tanımlanmamış.",
+                status_code=400,
+                detail="Geçerli bir collection seçilmelidir.",
             )
 
         original_xml = original_path.read_bytes()
@@ -1383,7 +1379,7 @@ def validate_update_field_change(
             old_attrs = dict(before[0].attrib)
             new_attrs = dict(after[0].attrib)
 
-            if old_attrs.get("Label") == old_name:
+            if new_name != old_name and old_attrs.get("Label") is not None:
                 old_attrs["Label"] = new_name
 
             if old_attrs != new_attrs:
@@ -1770,11 +1766,30 @@ def apply_work_item_type(request: WorkItemApplyRequest):
         )
 
         try:
+            import_xml = modified_xml
+
+            if name_change is not None and name_change["changed"]:
+                import_root = ET.fromstring(modified_xml)
+
+                matching_fields = [
+                    field
+                    for field in import_root.iter()
+                    if field.tag.split("}")[-1] == "FIELD"
+                    and field.get("refname") == name_change["field_ref"]
+                ]
+
+                if len(matching_fields) != 1:
+                    raise RuntimeError("Import XML içinde hedef FIELD doğrulanamadı.")
+
+                matching_fields[0].set("name", name_change["old_name"])
+
+                import_xml = ET.tostring(import_root, encoding="utf-8")
+
             import_work_item_type(
                 session,
                 collection_name,
                 project_name,
-                modified_xml,
+                import_xml,
             )
             if name_change is not None and name_change["changed"]:
                 field_after_import = get_server_field_info(
@@ -1850,7 +1865,7 @@ def apply_work_item_type(request: WorkItemApplyRequest):
             else:
                 verification_field_ref = metadata.get("field_ref")
 
-            if verification_field_ref and operation in ("add", "manual_edit"):
+            if verification_field_ref and operation in ("add", "update", "manual_edit"):
                 xml_matches = normalize_wit_xml_after_import(
                     verified_root, verification_field_ref
                 ) == normalize_wit_xml_after_import(
