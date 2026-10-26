@@ -1,7 +1,1 @@
-<GlobalLists>
-    <GlobalList name="TestStatuses">
-        <LISTITEM value="New" />
-        <LISTITEM value="Active" />
-        <LISTITEM value="Closed" />
-    <LISTITEM value="Resolved" /></GlobalList>
-</GlobalLists>
+<?xml version="1.0" encoding="utf-8"?><GlobalLists><GlobalList name="TestStatuses"><LISTITEM value="New"/><LISTITEM value="Active"/><LISTITEM value="Closed"/><LISTITEM value="Resolved"/></GlobalList></GlobalLists>
