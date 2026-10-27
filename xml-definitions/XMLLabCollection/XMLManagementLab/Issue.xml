@@ -129,8 +129,6 @@
         <REQUIRED />
       </FIELD>
       <FIELD name="Retention Test 20261022" refname="Lab.RetentionTest20261022" type="String" />
-      <FIELD name="Private" refname="Lab.Private" type="String" />
-      <FIELD name="TestDene" refname="Lab.GithubBackupTestField" type="String" />
     </FIELDS>
     <WORKFLOW>
       <STATES>
@@ -268,8 +266,6 @@
                 <Control FieldName="Lab.DenemeTwo" Type="FieldControl" Label="Lab Deneme Two" LabelPosition="Left" />
                 <Control FieldName="Lab.UXPreviewTest2026" Type="FieldControl" Label="UX Preview Test" LabelPosition="Left" />
                 <Control FieldName="Lab.RetentionTest20261022" Type="FieldControl" Label="Retention Test 20261022" LabelPosition="Left" />
-                <Control FieldName="Lab.Private" Type="FieldControl" Label="Update Private" LabelPosition="Left" />
-                <Control FieldName="Lab.GithubBackupTestField" Type="FieldControl" Label="TestDene" LabelPosition="Left" />
               </Column>
             </Group>
           </Column>
@@ -338,8 +334,6 @@
               <Control Label="Lab Deneme Two" Type="FieldControl" FieldName="Lab.DenemeTwo" />
               <Control Label="UX Preview Test" Type="FieldControl" FieldName="Lab.UXPreviewTest2026" />
               <Control Label="Retention Test 20261022" Type="FieldControl" FieldName="Lab.RetentionTest20261022" />
-              <Control Label="Update Private" Type="FieldControl" FieldName="Lab.Private" />
-              <Control Label="TestDene" Type="FieldControl" FieldName="Lab.GithubBackupTestField" />
             </Group>
           </Section>
           <Section>
