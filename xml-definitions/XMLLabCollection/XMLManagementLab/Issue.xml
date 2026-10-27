@@ -124,11 +124,6 @@
       </FIELD>
       <FIELD name="Import Test Field" refname="Lab.ImportTestField" type="String" />
       <FIELD name="Lab Deneme Two" refname="Lab.DenemeTwo" type="String" />
-      <FIELD name="Budefasonuyok" refname="Lab.UXPreviewTest2026" type="String">
-        <HELPTEXT>CombinedUpdateTest2026</HELPTEXT>
-        <REQUIRED />
-      </FIELD>
-      <FIELD name="Retention Test 20261022" refname="Lab.RetentionTest20261022" type="String" />
     </FIELDS>
     <WORKFLOW>
       <STATES>
@@ -264,8 +259,6 @@
                 <Control FieldName="Lab.Environment" Type="FieldControl" Label="Environment" />
                 <Control FieldName="Lab.ImportTestField" Type="FieldControl" Label="Import Test Field" LabelPosition="Left" />
                 <Control FieldName="Lab.DenemeTwo" Type="FieldControl" Label="Lab Deneme Two" LabelPosition="Left" />
-                <Control FieldName="Lab.UXPreviewTest2026" Type="FieldControl" Label="UX Preview Test" LabelPosition="Left" />
-                <Control FieldName="Lab.RetentionTest20261022" Type="FieldControl" Label="Retention Test 20261022" LabelPosition="Left" />
               </Column>
             </Group>
           </Column>
@@ -332,8 +325,6 @@
               <Control Label="Environment" Type="FieldControl" FieldName="Lab.Environment" />
               <Control Label="Import Test Field" Type="FieldControl" FieldName="Lab.ImportTestField" />
               <Control Label="Lab Deneme Two" Type="FieldControl" FieldName="Lab.DenemeTwo" />
-              <Control Label="UX Preview Test" Type="FieldControl" FieldName="Lab.UXPreviewTest2026" />
-              <Control Label="Retention Test 20261022" Type="FieldControl" FieldName="Lab.RetentionTest20261022" />
             </Group>
           </Section>
           <Section>
