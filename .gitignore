@@ -65,3 +65,7 @@ xml-differences.txt
 test_*.py
 *_test.py
 check_backup_retention.py
+
+# GitHub XML integration
+!xml-definitions/
+!xml-definitions/*.xml

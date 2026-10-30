@@ -57,6 +57,18 @@ from github_service import (
 logger = logging.getLogger(__name__)
 app = FastAPI()
 
+from dotenv import load_dotenv
+
+load_dotenv()
+GITHUB_BACKUP_BRANCH = os.getenv("GITHUB_BACKUP_BRANCH")
+
+
+def get_github_backup_branch():
+    if not GITHUB_BACKUP_BRANCH:
+        raise ValueError("GITHUB_BACKUP_BRANCH is not configured.")
+
+    return GITHUB_BACKUP_BRANCH
+
 
 @app.get("/health")
 def get_health():
@@ -166,6 +178,13 @@ class GithubPushRequest(BaseModel):
     branch: str
     xml_content: str
     sha: str | None = None
+
+
+class GithubWitBackupRequest(BaseModel):
+    collection_name: str
+    project_name: str
+    work_item_type: str
+    branch: str
 
 
 @app.post("/preview-add-field")
@@ -3262,6 +3281,76 @@ def github_push(request: GithubPushRequest):
         ) from error
 
 
+@app.post("/github/backup-wit")
+def github_backup_wit(request: GithubWitBackupRequest):
+    try:
+        # 1. Azure DevOps Server bağlantısı
+        session = create_winrm_session()
+
+        # 2. Güncel Work Item Type XML'ini export et
+        xml_bytes = get_project_xml(
+            session,
+            request.collection_name,
+            request.project_name,
+            request.work_item_type,
+        )
+
+        xml_content = xml_bytes.decode("utf-8-sig")
+
+        # 3. Her XML için sabit GitHub dosya yolu
+        for name in (
+            request.collection_name,
+            request.project_name,
+            request.work_item_type,
+        ):
+            if not re.fullmatch(r"[A-Za-z0-9._-]+", name) or name in (".", ".."):
+                raise ValueError("Geçersiz XML yolu bileşeni.")
+
+        file_path = (
+            f"xml-definitions/"
+            f"{request.collection_name}/"
+            f"{request.project_name}/"
+            f"{request.work_item_type}.xml"
+        )
+
+        # 4. GitHub'a yedekle
+        result = push_xml_to_github(
+            file_path=file_path,
+            branch=request.branch,
+            xml_content=xml_content,
+            sha=None,
+        )
+
+        return {
+            **result,
+            "collection_name": request.collection_name,
+            "project_name": request.project_name,
+            "work_item_type": request.work_item_type,
+            "file_path": file_path,
+            "branch": request.branch,
+        }
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
+    except requests.exceptions.HTTPError as error:
+        status = error.response.status_code if error.response is not None else 502
+        raise HTTPException(
+            status_code=status,
+            detail="GitHub backup işlemi başarısız.",
+        ) from error
+
+    except (RuntimeError, UnicodeError, requests.exceptions.RequestException):
+        logger.exception("GitHub WIT backup başarısız")
+        raise HTTPException(
+            status_code=502,
+            detail="XML export veya GitHub bağlantısı başarısız.",
+        )
+
+
 @app.get("/github/xml-history")
 def github_xml_history(file_path: str, branch: str):
     try:
@@ -3328,5 +3417,58 @@ def github_xml_files(branch: str):
             status_code=400,
             detail=str(error),
         ) from error
+
+
+def ensure_github_wit_baseline(
+    collection_name: str,
+    project_name: str,
+    work_item_type: str,
+    current_xml: bytes,
+):
+    branch = get_github_backup_branch()
+
+    for name in (collection_name, project_name, work_item_type):
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", name) or name in (".", ".."):
+            raise ValueError("Geçersiz XML yolu bileşeni.")
+
+    file_path = (
+        f"xml-definitions/{collection_name}/" f"{project_name}/{work_item_type}.xml"
+    )
+
+    xml_content = current_xml.decode("utf-8-sig")
+
+    try:
+        existing = pull_xml_from_github(file_path, branch)
+
+    except requests.exceptions.HTTPError as exc:
+        if exc.response is None or exc.response.status_code != 404:
+            raise
+
+        # Dosya yoksa mevcut sunucu XML'ini ilk sürüm olarak kaydet.
+        result = push_xml_to_github(
+            file_path=file_path,
+            branch=branch,
+            xml_content=xml_content,
+        )
+
+        return {
+            "file_path": file_path,
+            "branch": branch,
+            "baseline_created": result["changed"],
+            "sha": result["sha"],
+        }
+
+    if existing["xml_content"] != xml_content:
+        raise ValueError(
+            "GitHub'daki XML ile Azure DevOps'taki mevcut XML farklı. "
+            "Otomatik Apply öncesinde sürümler uzlaştırılmalı."
+        )
+
+    return {
+        "file_path": file_path,
+        "branch": branch,
+        "baseline_created": False,
+        "sha": existing["sha"],
+    }
 
 
