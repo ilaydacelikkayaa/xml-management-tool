@@ -458,7 +458,15 @@ def get_work_item_ids(
     start_date: date | None = None,
     *,
     collection_name: str,
+    date_field: str = "System.CreatedDate",
 ):
+    allowed_date_fields = {
+        "System.CreatedDate",
+        "System.ChangedDate",
+    }
+
+    if date_field not in allowed_date_fields:
+        raise ValueError("Geçersiz tarih alanı")
     safe_project_name = escape_wiql_value(project_name)
     safe_work_item_type = escape_wiql_value(work_item_type)
 
@@ -467,7 +475,7 @@ def get_work_item_ids(
             "Select [System.Id] From WorkItems "
             f"WHERE [System.WorkItemType] = '{safe_work_item_type}' "
             f"AND [System.TeamProject] = '{safe_project_name}' "
-            f"AND [System.CreatedDate] >= '{start_date}'"
+            f"AND [{date_field}] >= '{start_date}'"
         )
     }
 
@@ -532,7 +540,7 @@ def get_work_items(ids: list, *, collection_name: str):
     request = requests.get(
         auth=("", os.getenv("AZURE_DEVOPS_PAT")),
         url=second_url,
-        timeout=15,
+        timeout=(10, 60),
     )
 
     request.raise_for_status()
@@ -587,10 +595,33 @@ def analyze_field(
         ids,
         collection_name=collection_name,
     )
-
     analysis = analyze_work_items(work_items, field_ref)
-
     return analysis
+
+
+def analyze_project_fields(xml_bytes: bytes, work_items: list):
+    fields = list_xml_fields(xml_bytes)
+    results = []
+
+    for field in fields:
+        usage = analyze_work_items(work_items, field["refname"])
+
+        candidate = evaluate_cleanup_candidate({"usage": usage})
+
+        results.append(
+            {
+                "field_ref": field["refname"],
+                "field_name": field["name"],
+                "field_type": field["field_type"],
+                "total": usage["total"],
+                "filled": usage["filled"],
+                "empty": usage["empty"],
+                "usage_rate": usage["rate"],
+                "candidate": candidate,
+            }
+        )
+
+    return results
 
 
 def find_field_references(xml_path: str, field_ref: str):
@@ -639,14 +670,12 @@ def analyze_field_full(
 
 
 def evaluate_cleanup_candidate(analysis: dict):
-    rate = analysis["usage"]["rate"]
+    usage = analysis["usage"]
 
-    if rate == 0:
-        candidate = True
-    else:
-        candidate = False
+    if usage["total"] == 0:
+        return False
 
-    return candidate
+    return usage["rate"] == 0
 
 
 def build_field_report(analysis: dict):
@@ -1685,6 +1714,14 @@ def update_field_in_xml(
     }
 
 
+def contains_field_reference(value: str, field_ref: str) -> bool:
+    if not value:
+        return False
+
+    pattern = rf"(?<![\w.]){re.escape(field_ref)}(?![\w.])"
+    return re.search(pattern, value) is not None
+
+
 def remove_field_from_xml(xml_path: str, field_ref: str, output_path: str):
     if not field_ref or not field_ref.strip():
         raise ValueError("Field reference name boş olamaz.")
@@ -1712,8 +1749,6 @@ def remove_field_from_xml(xml_path: str, field_ref: str, output_path: str):
     if target_field is None:
         raise ValueError(f"Alan bulunamadı: {field_ref}")
 
-    # Önce diğer XML öğelerindeki bağımlılıkları kontrol et.
-    # FORM kontrolleri Remove sırasında kaldırılabilir.
     dependencies = []
 
     for element in root.iter():
@@ -1726,7 +1761,7 @@ def remove_field_from_xml(xml_path: str, field_ref: str, output_path: str):
             continue
 
         for attribute_name, attribute_value in element.attrib.items():
-            if field_ref in attribute_value:
+            if contains_field_reference(attribute_value, field_ref):
                 dependencies.append(
                     {
                         "element": tag,
@@ -1735,7 +1770,7 @@ def remove_field_from_xml(xml_path: str, field_ref: str, output_path: str):
                     }
                 )
 
-        if element.text and field_ref in element.text:
+        if contains_field_reference(element.text, field_ref):
             dependencies.append(
                 {
                     "element": tag,
@@ -1752,18 +1787,16 @@ def remove_field_from_xml(xml_path: str, field_ref: str, output_path: str):
             "dependencies": dependencies,
         }
 
-    # FORM altındaki Layout / WebLayout kontrollerini kaldır.
     removed_controls = remove_field_controls(root, field_ref)
 
-    # FIELD tanımını kaldır.
     fields_element.remove(target_field)
 
-    # Çıktıda referans kalmadığını kontrol et.
     remaining_references = []
 
     for element in root.iter():
         for attribute_name, value in element.attrib.items():
-            if field_ref in value:
+            if contains_field_reference(value, field_ref):
+
                 remaining_references.append(
                     {
                         "element": local_tag(element),
@@ -1771,7 +1804,7 @@ def remove_field_from_xml(xml_path: str, field_ref: str, output_path: str):
                     }
                 )
 
-        if element.text and field_ref in element.text:
+        if contains_field_reference(element.text, field_ref):
             remaining_references.append(
                 {
                     "element": local_tag(element),
@@ -1847,6 +1880,144 @@ def validate_remove_field_change(
                     "Remove XML doğrulaması başarılı."
                     if valid
                     else "Preview XML beklenen Remove değişikliğiyle eşleşmiyor."
+                ),
+            }
+
+    except (ET.ParseError, OSError, ValueError, TypeError) as error:
+        return {
+            "success": False,
+            "message": str(error),
+        }
+
+
+def validate_bulk_remove_field_change(
+    original_xml: bytes,
+    modified_xml: bytes,
+    field_refs: list[str],
+):
+    import tempfile
+
+    if (
+        not isinstance(field_refs, list)
+        or not field_refs
+        or any(not isinstance(ref, str) or not ref.strip() for ref in field_refs)
+        or len(field_refs) != len(set(field_refs))
+    ):
+        return {
+            "success": False,
+            "message": "Geçersiz veya tekrarlı field listesi.",
+        }
+
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            current_path = Path(temp_dir) / "original.xml"
+            current_path.write_bytes(original_xml)
+
+            for index, field_ref in enumerate(field_refs):
+                output_path = Path(temp_dir) / f"step_{index}.xml"
+
+                result = remove_field_from_xml(
+                    xml_path=str(current_path),
+                    field_ref=field_ref,
+                    output_path=str(output_path),
+                )
+
+                if result.get("success") is not True:
+                    return {
+                        "success": False,
+                        "message": f"{field_ref} doğrulanamadı.",
+                        "details": result,
+                    }
+
+                current_path = output_path
+
+            expected_root = ET.fromstring(current_path.read_bytes())
+            preview_root = ET.fromstring(modified_xml)
+
+            def canonical(element):
+                return ET.canonicalize(
+                    ET.tostring(element, encoding="unicode"),
+                    strip_text=True,
+                )
+
+            valid = canonical(expected_root) == canonical(preview_root)
+
+            return {
+                "success": valid,
+                "validated_fields": field_refs,
+                "message": (
+                    "Bulk Remove XML doğrulaması başarılı."
+                    if valid
+                    else "Preview XML beklenen Bulk Remove değişiklikleriyle eşleşmiyor."
+                ),
+            }
+
+    except (ET.ParseError, OSError, ValueError, TypeError) as error:
+        return {
+            "success": False,
+            "message": str(error),
+        }
+
+
+def validate_bulk_remove_field_change(
+    original_xml: bytes,
+    modified_xml: bytes,
+    field_refs: list[str],
+):
+    import tempfile
+
+    if (
+        not isinstance(field_refs, list)
+        or not field_refs
+        or any(not isinstance(ref, str) or not ref.strip() for ref in field_refs)
+        or len(field_refs) != len(set(field_refs))
+    ):
+        return {
+            "success": False,
+            "message": "Geçersiz veya tekrarlı field listesi.",
+        }
+
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            current_path = Path(temp_dir) / "original.xml"
+            current_path.write_bytes(original_xml)
+
+            for index, field_ref in enumerate(field_refs):
+                output_path = Path(temp_dir) / f"step_{index}.xml"
+
+                result = remove_field_from_xml(
+                    xml_path=str(current_path),
+                    field_ref=field_ref,
+                    output_path=str(output_path),
+                )
+
+                if result.get("success") is not True:
+                    return {
+                        "success": False,
+                        "message": f"{field_ref} doğrulanamadı.",
+                        "details": result,
+                    }
+
+                current_path = output_path
+
+            expected_root = ET.fromstring(current_path.read_bytes())
+            preview_root = ET.fromstring(modified_xml)
+
+            def canonical(element):
+                return ET.canonicalize(
+                    ET.tostring(element, encoding="unicode"),
+                    strip_text=True,
+                )
+
+            valid = canonical(expected_root) == canonical(preview_root)
+
+            return {
+                "success": valid,
+                "validated_fields": field_refs,
+                "message": (
+                    "Bulk Remove XML doğrulaması başarılı."
+                    if valid
+                    else "Preview XML beklenen Bulk Remove değişiklikleriyle eşleşmiyor."
                 ),
             }
 
@@ -2873,4 +3044,41 @@ def cleanup_old_wit_backups(
         "would_delete": would_delete,
         "kept": [backup_dir.name for _, backup_dir in eligible_backups[:keep]],
         "protected": protected_backups,
+    }
+
+
+def analyze_garbage(
+    collection_name: str,
+    project_name: str,
+    work_item_type: str,
+    xml_bytes: bytes,
+    start_date: date | None = None,
+):
+    if start_date is None:
+        start_date = date.today() - relativedelta(months=6)
+
+    ids = get_work_item_ids(
+        project_name,
+        work_item_type,
+        start_date,
+        collection_name=collection_name,
+        date_field="System.ChangedDate",
+    )
+
+    work_items = get_work_items(
+        ids,
+        collection_name=collection_name,
+    )
+
+    results = analyze_project_fields(xml_bytes, work_items)
+
+    return {
+        "collection_name": collection_name,
+        "project_name": project_name,
+        "work_item_type": work_item_type,
+        "start_date": start_date.isoformat(),
+        "total_work_items": len(work_items),
+        "total_fields": len(results),
+        "cleanup_candidates": sum(1 for result in results if result["candidate"]),
+        "fields": results,
     }

@@ -34,6 +34,13 @@ function Sidebar({ activePage, setActivePage }) {
                 >
                     Azure Repos
                 </button>
+                <button
+                    type="button"
+                    className={`nav-item ${activePage === 'garbageCleanup' ? 'active' : ''}`}
+                    onClick={() => setActivePage('garbageCleanup')}
+                >
+                    Garbage Cleanup
+                </button>
             </nav>
 
         </aside>

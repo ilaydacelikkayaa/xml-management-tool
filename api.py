@@ -44,7 +44,9 @@ from devops_backend import (
     get_server_field_info,
     change_field_name,
     validate_remove_field_change,
+    validate_bulk_remove_field_change,
     cleanup_old_wit_backups,
+    analyze_garbage,
     list_azure_git_repositories,
     list_azure_repo_xml_files,
     push_xml_to_azure_repo,
@@ -101,8 +103,35 @@ class RemoveFieldRequest(BaseModel):
     field_ref: str
 
 
+class GarbageAnalysisRequest(BaseModel):
+    collection_name: str = Field(min_length=1)
+    project_name: str = Field(min_length=1)
+    work_item_type: str = Field(min_length=1)
+    start_date: date | None = None
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
+class GarbageBulkPreviewRequest(BaseModel):
+    collection_name: str = Field(min_length=1)
+    project_name: str = Field(min_length=1)
+    work_item_type: str = Field(min_length=1)
+    field_refs: list[str] = Field(min_length=1)
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
 class WorkItemDryRunRequest(BaseModel):
     preview_id: str
+
+
+class GarbageMultiAnalysisRequest(BaseModel):
+    collection_name: str = Field(min_length=1)
+    project_names: list[str] = Field(min_length=1)
+    work_item_type: str = Field(min_length=1)
+    start_date: date | None = None
+
+    model_config = ConfigDict(str_strip_whitespace=True)
 
 
 class UpdateFieldRequest(BaseModel):
@@ -1771,7 +1800,7 @@ def apply_work_item_type(request: WorkItemApplyRequest):
             )
 
         operation = metadata.get("operation")
-        if operation not in ("add", "update", "remove", "manual_edit"):
+        if operation not in ("add", "update", "remove", "manual_edit", "bulk_remove"):
             raise HTTPException(
                 status_code=403,
                 detail="Gerçek Apply yalnızca Add, Update, Remove ve doğrulanmış Manual Edit işlemlerini destekliyor.",
@@ -1893,6 +1922,20 @@ def apply_work_item_type(request: WorkItemApplyRequest):
                     raise ValueError(
                         field_change.get(
                             "message", "Remove XML güvenlik doğrulaması başarısız."
+                        )
+                    )
+            elif operation == "bulk_remove":
+                field_change = validate_bulk_remove_field_change(
+                    original_xml=original_xml,
+                    modified_xml=modified_xml,
+                    field_refs=metadata["field_refs"],
+                )
+
+                if field_change.get("success") is not True:
+                    raise ValueError(
+                        field_change.get(
+                            "message",
+                            "Bulk Remove XML güvenlik doğrulaması başarısız.",
                         )
                     )
             elif operation == "manual_edit":
@@ -2177,6 +2220,7 @@ def apply_work_item_type(request: WorkItemApplyRequest):
                         "backup_id": backup["backup_id"],
                         "operation": operation,
                         "field_ref": metadata.get("field_ref"),
+                        "field_refs": metadata.get("field_refs", []),
                         "field_name_change": name_change,
                         "error": str(exc),
                     },
@@ -2988,7 +3032,7 @@ def check_multi_project_apply(request: MultiProjectApplyRequest):
             update_validation_valid = False
             remove_validation_valid = False
             manual_validation_valid = False
-
+            bulk_remove_validation_valid = False
             if metadata.get("operation") == "manual_edit" and hashes_valid:
                 try:
                     validation = validate_manual_xml_change(
@@ -3029,6 +3073,25 @@ def check_multi_project_apply(request: MultiProjectApplyRequest):
 
                 except (ValueError, KeyError, TypeError):
                     logger.exception("Remove XML güvenlik doğrulaması başarısız")
+
+            if metadata.get("operation") == "bulk_remove" and hashes_valid:
+                try:
+                    validation = validate_bulk_remove_field_change(
+                        original_xml=original_xml,
+                        modified_xml=modified_xml,
+                        field_refs=metadata["field_refs"],
+                    )
+
+                    bulk_remove_validation_valid = validation.get("success") is True
+
+                    logger.info(
+                        "BULK REMOVE VALIDATION | preview=%s | result=%s",
+                        preview_id,
+                        validation,
+                    )
+
+                except (ValueError, KeyError, TypeError):
+                    logger.exception("Bulk Remove XML güvenlik doğrulaması başarısız")
 
             if metadata.get("operation") == "update" and hashes_valid:
                 options = metadata.get("update_options")
@@ -3081,6 +3144,7 @@ def check_multi_project_apply(request: MultiProjectApplyRequest):
                     or (operation == "update" and update_validation_valid)
                     or (operation == "remove" and remove_validation_valid)
                     or (operation == "manual_edit" and manual_validation_valid)
+                    or (operation == "bulk_remove" and bulk_remove_validation_valid)
                 )
             )
             operation = metadata.get("operation")
@@ -3094,7 +3158,20 @@ def check_multi_project_apply(request: MultiProjectApplyRequest):
                 readiness_message = "Remove işlemi için ön kontroller başarılı."
             elif allowed and operation == "manual_edit":
                 readiness_message = "Manual XML Add işlemi için ön kontroller başarılı."
-
+            elif allowed and operation == "bulk_remove":
+                readiness_message = "Bulk Remove işlemi için ön kontroller başarılı."
+            elif operation == "bulk_remove":
+                if not bulk_remove_validation_valid:
+                    readiness_message = "Bulk Remove XML doğrulaması başarısız."
+                elif not server_xml_valid:
+                    readiness_message = (
+                        "Sunucudaki XML preview oluşturulduğundan beri değişmiş."
+                    )
+                else:
+                    readiness_message = (
+                        "Bulk Remove XML doğrulaması başarılı. "
+                        "Gerçek Apply için ek güvenlik kontrolleri bekleniyor."
+                    )
             elif operation == "manual_edit":
                 readiness_message = "Manual XML güvenlik doğrulaması başarısız."
             elif operation == "remove":
@@ -3110,7 +3187,14 @@ def check_multi_project_apply(request: MultiProjectApplyRequest):
                 {
                     "preview_id": preview_id,
                     "project_name": metadata.get("project_name"),
+                    "operation": operation,
                     "ready": allowed,
+                    "bulk_remove_validation_valid": (
+                        bulk_remove_validation_valid
+                        if operation == "bulk_remove"
+                        else None
+                    ),
+                    "server_xml_valid": server_xml_valid,
                     "message": readiness_message,
                 }
             )
@@ -3559,6 +3643,39 @@ def github_push(request: GithubPushRequest):
         ) from error
 
 
+@app.post("/garbage/analyze")
+def garbage_analyze(request: GarbageAnalysisRequest):
+    try:
+        session = create_winrm_session()
+
+        xml_bytes = get_project_xml(
+            session,
+            request.collection_name,
+            request.project_name,
+            request.work_item_type,
+        )
+
+        result = analyze_garbage(
+            collection_name=request.collection_name,
+            project_name=request.project_name,
+            work_item_type=request.work_item_type,
+            xml_bytes=xml_bytes,
+            start_date=request.start_date,
+        )
+
+        return result
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    except Exception:
+        logger.exception("Garbage Cleanup analizi başarısız")
+        raise HTTPException(
+            status_code=500,
+            detail="Garbage Cleanup analizi gerçekleştirilemedi.",
+        )
+
+
 @app.post("/github/backup-wit")
 def github_backup_wit(request: GithubWitBackupRequest):
     try:
@@ -3851,6 +3968,178 @@ def ensure_github_wit_baseline(
         "branch": branch,
         "baseline_created": False,
         "sha": existing["sha"],
+    }
+
+
+@app.post("/garbage/preview-bulk")
+def garbage_preview_bulk(request: GarbageBulkPreviewRequest):
+    field_refs = request.field_refs
+
+    if any(not isinstance(ref, str) or not ref.strip() for ref in field_refs) or len(
+        field_refs
+    ) != len(set(field_refs)):
+        raise HTTPException(
+            status_code=400,
+            detail="Alan referansları boş veya tekrarlı olamaz.",
+        )
+
+    try:
+        session = create_winrm_session()
+
+        original_xml = get_project_xml(
+            session,
+            request.collection_name,
+            request.project_name,
+            request.work_item_type,
+        )
+
+        results = []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            current_path = Path(temp_dir) / "original.xml"
+            current_path.write_bytes(original_xml)
+
+            for index, field_ref in enumerate(field_refs):
+                output_path = Path(temp_dir) / f"step_{index}.xml"
+
+                result = remove_field_from_xml(
+                    xml_path=str(current_path),
+                    field_ref=field_ref,
+                    output_path=str(output_path),
+                )
+
+                if not result.get("success"):
+                    return {
+                        "success": False,
+                        "message": f"{field_ref} kaldırılamadı. Preview oluşturulmadı.",
+                        "failed_field": field_ref,
+                        "details": result,
+                    }
+
+                results.append(
+                    {
+                        "field_ref": field_ref,
+                        "removed_controls": result.get("removed_controls", 0),
+                    }
+                )
+
+                current_path = output_path
+
+            preview_xml = current_path.read_bytes()
+
+        # XML yapısının geçerli olduğunu kontrol et.
+        original_root = ET.fromstring(original_xml)
+        preview_root = ET.fromstring(preview_xml)
+
+        if (
+            original_root.tag.split("}")[-1] != "WITD"
+            or preview_root.tag.split("}")[-1] != "WITD"
+        ):
+            raise ValueError("Geçersiz WIT XML.")
+
+        import uuid
+
+        preview_id = uuid.uuid4().hex
+        preview_dir = Path("previews") / "work-item-types" / preview_id
+        preview_dir.mkdir(parents=True, exist_ok=False)
+
+        original_hash = hashlib.sha256(original_xml).hexdigest()
+        preview_hash = hashlib.sha256(preview_xml).hexdigest()
+
+        metadata = {
+            "preview_id": preview_id,
+            "collection_name": request.collection_name,
+            "project_name": request.project_name,
+            "work_item_type": request.work_item_type,
+            "operation": "bulk_remove",
+            "field_refs": field_refs,
+            "original_sha256": original_hash,
+            "preview_sha256": preview_hash,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        (preview_dir / "original.xml").write_bytes(original_xml)
+        (preview_dir / "preview.xml").write_bytes(preview_xml)
+        (preview_dir / "metadata.json").write_text(
+            json.dumps(metadata, indent=2),
+            encoding="utf-8",
+        )
+
+        return {
+            "success": True,
+            "message": "Bulk Cleanup preview başarıyla oluşturuldu.",
+            "preview_id": preview_id,
+            "removed_fields": results,
+            "total_removed": len(results),
+            "original_sha256": original_hash,
+            "preview_sha256": preview_hash,
+            "apply_allowed": False,
+        }
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    except Exception:
+        logger.exception("Bulk Cleanup preview başarısız")
+        raise HTTPException(
+            status_code=500,
+            detail="Bulk Cleanup preview oluşturulamadı.",
+        )
+
+
+@app.post("/garbage/analyze-multi")
+def garbage_analyze_multi(request: GarbageMultiAnalysisRequest):
+    results = []
+
+    for project_name in dict.fromkeys(request.project_names):
+        try:
+            session = create_winrm_session()
+
+            xml_bytes = get_project_xml(
+                session,
+                request.collection_name,
+                project_name,
+                request.work_item_type,
+            )
+
+            result = analyze_garbage(
+                collection_name=request.collection_name,
+                project_name=project_name,
+                work_item_type=request.work_item_type,
+                xml_bytes=xml_bytes,
+                start_date=request.start_date,
+            )
+
+            results.append(
+                {
+                    "project_name": project_name,
+                    "status": "analyzed",
+                    "data": result,
+                }
+            )
+
+        except Exception as exc:
+            logger.exception(
+                "Multi-Project Garbage Analysis failed: %s",
+                project_name,
+            )
+
+            results.append(
+                {
+                    "project_name": project_name,
+                    "status": "error",
+                    "message": str(exc),
+                }
+            )
+
+    return {
+        "success": True,
+        "collection_name": request.collection_name,
+        "work_item_type": request.work_item_type,
+        "total_projects": len(results),
+        "analyzed_count": sum(item["status"] == "analyzed" for item in results),
+        "error_count": sum(item["status"] == "error" for item in results),
+        "results": results,
     }
 
 
