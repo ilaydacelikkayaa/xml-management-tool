@@ -3733,6 +3733,7 @@ def get_wit_preview_summary(preview_id: str):
     }
 
 
+# Github pull push
 @app.post("/github/pull-xml")
 def github_pull(request: GitHubPullRequest):
     result = pull_xml_from_github(request.file_path, request.branch)
