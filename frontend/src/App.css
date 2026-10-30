@@ -2701,3 +2701,150 @@
     min-width: 0;
   }
 }
+
+/* GitHub Integration */
+
+.github-panel {
+  margin: 24px 0;
+  padding: 26px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  box-shadow: 0 4px 18px rgba(15, 23, 42, 0.04);
+}
+
+.github-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 22px;
+}
+
+.github-panel-icon {
+  width: 46px;
+  height: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f1f5f9;
+  border-radius: 12px;
+  font-size: 24px;
+  color: #334155;
+}
+
+.github-panel-heading {
+  flex: 1;
+}
+
+.github-panel-heading h2 {
+  margin: 0 0 5px;
+  font-size: 18px;
+  font-weight: 650;
+  color: #0f172a;
+}
+
+.github-panel-heading p {
+  margin: 0;
+  font-size: 13px;
+  color: #64748b;
+}
+
+.github-status {
+  padding: 7px 11px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  border-radius: 20px;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.github-repository {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 18px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  margin-bottom: 20px;
+}
+
+.github-repository-label {
+  font-size: 10px;
+  letter-spacing: 1px;
+  font-weight: 700;
+  color: #64748b;
+}
+
+.github-repository strong {
+  font-size: 15px;
+  color: #0f172a;
+}
+
+.github-repository span:not(.github-repository-label) {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.github-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.github-actions button {
+  flex: 1;
+  padding: 12px 16px;
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.2s;
+}
+
+.github-pull-btn {
+  background: #1e293b;
+  color: #ffffff;
+  border: 1px solid #1e293b;
+}
+
+.github-pull-btn:hover:not(:disabled) {
+  background: #334155;
+}
+
+.github-push-btn {
+  background: #ffffff;
+  color: #1e293b;
+  border: 1px solid #cbd5e1;
+}
+
+.github-push-btn:hover:not(:disabled) {
+  background: #f1f5f9;
+}
+
+.github-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.github-error {
+  margin-top: 14px;
+  color: #b91c1c;
+  font-size: 13px;
+}
+
+@media (max-width: 640px) {
+  .github-panel {
+    padding: 18px;
+  }
+
+  .github-panel-header {
+    flex-wrap: wrap;
+  }
+
+  .github-actions {
+    flex-direction: column;
+  }
+}
+
+

@@ -46,6 +46,10 @@ from devops_backend import (
     validate_remove_field_change,
     cleanup_old_wit_backups,
 )
+from github_service import (
+    pull_xml_from_github,
+    push_xml_to_github,
+)
 
 logger = logging.getLogger(__name__)
 app = FastAPI()
@@ -147,6 +151,18 @@ class ManualXmlEditRequest(BaseModel):
 class WorkItemApplyRequest(BaseModel):
     preview_id: str
     confirm: bool = False
+
+
+class GitHubPullRequest(BaseModel):
+    file_path: str
+    branch: str
+
+
+class GithubPushRequest(BaseModel):
+    file_path: str
+    branch: str
+    xml_content: str
+    sha: str | None = None
 
 
 @app.post("/preview-add-field")
@@ -3216,3 +3232,30 @@ def get_wit_preview_summary(preview_id: str):
         "field_name": summary_field_name,
         "import_performed": False,
     }
+
+
+@app.post("/github/pull-xml")
+def github_pull(request: GitHubPullRequest):
+    result = pull_xml_from_github(request.file_path, request.branch)
+    return result
+
+
+@app.put("/github/push-xml")
+def github_push(request: GithubPushRequest):
+    try:
+        result = push_xml_to_github(
+            request.file_path, request.branch, request.xml_content, request.sha
+        )
+        return result
+
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    except requests.exceptions.HTTPError as error:
+        status = error.response.status_code if error.response is not None else 502
+
+        raise HTTPException(
+            status_code=status, detail="GitHub güncelleme işlemini reddetti."
+        ) from error
+
+
