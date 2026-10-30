@@ -27,7 +27,22 @@ function Sidebar({ activePage, setActivePage }) {
                 >
                     GlobalLists
                 </button>
+                <button
+                    type="button"
+                    className={`nav-item ${activePage === 'azure' ? 'active' : ''}`}
+                    onClick={() => setActivePage('azure')}
+                >
+                    Azure Repos
+                </button>
+                <button
+                    type="button"
+                    className={`nav-item ${activePage === 'garbageCleanup' ? 'active' : ''}`}
+                    onClick={() => setActivePage('garbageCleanup')}
+                >
+                    Garbage Cleanup
+                </button>
             </nav>
+
         </aside>
     )
 }

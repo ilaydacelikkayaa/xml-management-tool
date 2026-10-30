@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from datetime import date
 from pathlib import Path
 import logging
+from typing import Literal
 import difflib
 import tempfile
 import xml.etree.ElementTree as ET
@@ -44,11 +45,38 @@ from devops_backend import (
     get_server_field_info,
     change_field_name,
     validate_remove_field_change,
+    validate_bulk_remove_field_change,
     cleanup_old_wit_backups,
+    analyze_garbage,
+    list_azure_git_repositories,
+    list_azure_repo_xml_files,
+    push_xml_to_azure_repo,
+    get_azure_repo_xml_history,
+    get_azure_repo_xml_commit_diff,
+    read_azure_repo_xml,
+)
+from github_service import (
+    pull_xml_from_github,
+    push_xml_to_github,
+    get_xml_history,
+    get_xml_commit_diff,
+    list_github_xml_files,
 )
 
 logger = logging.getLogger(__name__)
 app = FastAPI()
+
+from dotenv import load_dotenv
+
+load_dotenv()
+GITHUB_BACKUP_BRANCH = os.getenv("GITHUB_BACKUP_BRANCH")
+
+
+def get_github_backup_branch():
+    if not GITHUB_BACKUP_BRANCH:
+        raise ValueError("GITHUB_BACKUP_BRANCH is not configured.")
+
+    return GITHUB_BACKUP_BRANCH
 
 
 @app.get("/health")
@@ -76,8 +104,35 @@ class RemoveFieldRequest(BaseModel):
     field_ref: str
 
 
+class GarbageAnalysisRequest(BaseModel):
+    collection_name: str = Field(min_length=1)
+    project_name: str = Field(min_length=1)
+    work_item_type: str = Field(min_length=1)
+    start_date: date | None = None
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
+class GarbageBulkPreviewRequest(BaseModel):
+    collection_name: str = Field(min_length=1)
+    project_name: str = Field(min_length=1)
+    work_item_type: str = Field(min_length=1)
+    field_refs: list[str] = Field(min_length=1)
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
 class WorkItemDryRunRequest(BaseModel):
     preview_id: str
+
+
+class GarbageMultiAnalysisRequest(BaseModel):
+    collection_name: str = Field(min_length=1)
+    project_names: list[str] = Field(min_length=1)
+    work_item_type: str = Field(min_length=1)
+    start_date: date | None = None
+
+    model_config = ConfigDict(str_strip_whitespace=True)
 
 
 class UpdateFieldRequest(BaseModel):
@@ -149,6 +204,34 @@ class WorkItemApplyRequest(BaseModel):
     confirm: bool = False
 
 
+class GitHubPullRequest(BaseModel):
+    file_path: str
+    branch: str
+
+
+class AzureRepoBackupRequest(BaseModel):
+    collection_name: str
+    project_name: str
+    wit_name: str
+    repository_id: str
+    branch: str = "main"
+    confirm: bool = False
+
+
+class GithubPushRequest(BaseModel):
+    file_path: str
+    branch: str
+    xml_content: str
+    sha: str | None = None
+
+
+class GithubWitBackupRequest(BaseModel):
+    collection_name: str
+    project_name: str
+    work_item_type: str
+    branch: str
+
+
 @app.post("/preview-add-field")
 def preview_add_field(request: AddFieldRequest):
     try:
@@ -211,6 +294,42 @@ def preview_add_field(request: AddFieldRequest):
         raise HTTPException(
             status_code=500, detail="Alan ekleme önizlemesi oluşturulamadı"
         )
+
+
+@app.get("/azure-repos/xml-history")
+def azure_repos_xml_history(
+    collection_name: str,
+    project_name: str,
+    repository_id: str,
+    file_path: str,
+    branch: str = "main",
+):
+    try:
+        return get_azure_repo_xml_history(
+            collection_name=collection_name,
+            project_name=project_name,
+            repository_id=repository_id,
+            file_path=file_path,
+            branch=branch,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+    except requests.exceptions.HTTPError as error:
+        status = error.response.status_code if error.response is not None else 502
+        logger.exception("Azure Repos XML History alınamadı")
+        raise HTTPException(
+            status_code=status,
+            detail="Azure Repos commit geçmişi alınamadı.",
+        ) from error
+    except requests.exceptions.RequestException as error:
+        logger.exception("Azure Repos History bağlantı hatası")
+        raise HTTPException(
+            status_code=502,
+            detail="Azure Repos sunucusuna bağlanılamadı.",
+        ) from error
 
 
 @app.post("/preview-update-field")
@@ -292,6 +411,174 @@ def preview_update_field(request: UpdateFieldRequest):
         raise HTTPException(
             status_code=500, detail="Alan güncelleme önizlemesi oluşturulamadı"
         )
+
+
+@app.get("/azure-repos/xml-commit-diff")
+def azure_repos_xml_commit_diff(
+    collection_name: str,
+    project_name: str,
+    repository_id: str,
+    file_path: str,
+    commit_id: str,
+):
+    try:
+        return get_azure_repo_xml_commit_diff(
+            collection_name=collection_name,
+            project_name=project_name,
+            repository_id=repository_id,
+            file_path=file_path,
+            commit_id=commit_id,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+    except requests.exceptions.HTTPError as error:
+        status = error.response.status_code if error.response is not None else 502
+        logger.exception("Azure Repos Commit Diff alınamadı")
+        raise HTTPException(
+            status_code=status,
+            detail="Azure Repos Commit Diff alınamadı.",
+        ) from error
+    except requests.exceptions.RequestException as error:
+        logger.exception("Azure Repos bağlantı hatası")
+        raise HTTPException(
+            status_code=502,
+            detail="Azure Repos sunucusuna bağlanılamadı.",
+        ) from error
+
+
+@app.get("/azure-repos/repositories")
+def azure_repos_repositories(collection_name: str, project_name: str):
+    try:
+        return list_azure_git_repositories(
+            collection_name=collection_name,
+            project_name=project_name,
+        )
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
+    except requests.exceptions.HTTPError as error:
+        status = error.response.status_code if error.response is not None else 502
+
+        logger.exception("Azure Repos repository listesi alınamadı")
+
+        raise HTTPException(
+            status_code=status,
+            detail="Azure Repos erişimi başarısız. PAT yetkilerini ve proje bilgilerini kontrol edin.",
+        ) from error
+
+    except requests.exceptions.RequestException as error:
+        logger.exception("Azure Repos bağlantı hatası")
+
+        raise HTTPException(
+            status_code=502,
+            detail="Azure Repos sunucusuna bağlanılamadı.",
+        ) from error
+
+
+@app.get("/azure-repos/xml-files")
+def azure_repos_xml_files(
+    collection_name: str,
+    project_name: str,
+    repository_id: str,
+    branch: str = "main",
+):
+    try:
+        return list_azure_repo_xml_files(
+            collection_name=collection_name,
+            project_name=project_name,
+            repository_id=repository_id,
+            branch=branch,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+    except requests.exceptions.HTTPError as error:
+        status = error.response.status_code if error.response is not None else 502
+        logger.exception("Azure Repos XML dosyaları listelenemedi")
+        raise HTTPException(
+            status_code=status,
+            detail="Azure Repos XML dosyaları alınamadı.",
+        ) from error
+    except requests.exceptions.RequestException as error:
+        logger.exception("Azure Repos bağlantı hatası")
+        raise HTTPException(
+            status_code=502,
+            detail="Azure Repos sunucusuna bağlanılamadı.",
+        ) from error
+
+
+@app.post("/azure-repos/backup-wit")
+def azure_repos_backup_wit(request: AzureRepoBackupRequest):
+    if not request.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Commit için confirm=true gerekli.",
+        )
+
+    try:
+        collection = request.collection_name
+        project = request.project_name
+        wit = request.wit_name
+
+        # Dosya yolunda güvenli isimler kullan.
+        for value in (collection, project, wit):
+            if not re.fullmatch(r"[A-Za-z0-9._-]+", value):
+                raise ValueError("Geçersiz collection, project veya WIT adı.")
+
+        file_path = f"/xml-definitions/{collection}/{project}/{wit}.xml"
+
+        # Mevcut GitHub backup endpoint'indeki XML export yöntemini kullan.
+        session = create_winrm_session()
+
+        xml_bytes = get_project_xml(
+            session,
+            collection,
+            project,
+            wit,
+        )
+
+        xml_content = xml_bytes.decode("utf-8-sig")
+
+        result = push_xml_to_azure_repo(
+            collection_name=collection,
+            project_name=project,
+            repository_id=request.repository_id,
+            file_path=file_path,
+            xml_content=xml_content,
+            branch=request.branch,
+        )
+
+        return result
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
+    except requests.exceptions.HTTPError as error:
+        status = error.response.status_code if error.response is not None else 502
+        logger.exception("Azure Repos backup başarısız")
+        raise HTTPException(
+            status_code=status,
+            detail="Azure Repos commit işlemi başarısız.",
+        ) from error
+
+    except requests.exceptions.RequestException as error:
+        logger.exception("Azure Repos bağlantı hatası")
+        raise HTTPException(
+            status_code=502,
+            detail="Azure Repos bağlantı hatası.",
+        ) from error
 
 
 @app.post("/preview-remove-field")
@@ -708,6 +995,120 @@ def preview_remove_global_list(request: GlobalListRemoveRequest):
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+class GlobalListBulkItem(BaseModel):
+    list_name: str
+    operation: Literal["add", "remove", "update"]
+    old_value: str = ""
+    new_value: str = ""
+
+
+class GlobalListBulkPreviewRequest(BaseModel):
+    collection_name: str
+    items: list[GlobalListBulkItem]
+
+
+@app.post("/global-lists/preview-bulk")
+def preview_bulk_global_lists(request: GlobalListBulkPreviewRequest):
+
+    if not request.collection_name.strip():
+        raise HTTPException(status_code=400, detail="Collection gerekli.")
+
+    if not request.items:
+        raise HTTPException(status_code=400, detail="En az bir işlem gerekli.")
+
+    session = create_winrm_session()
+    original_xml = export_global_list(session, request.collection_name)
+
+    root = ET.fromstring(original_xml)
+
+    if root.tag.split("}")[-1] != "GLOBALLISTS":
+        raise HTTPException(status_code=400, detail="Geçersiz GlobalList XML.")
+
+    lists = {element.get("name"): element for element in root.iter("GLOBALLIST")}
+
+    changes = []
+
+    for row_number, item in enumerate(request.items, start=1):
+        list_name = item.list_name.strip()
+        operation = item.operation
+        old_value = item.old_value.strip()
+        new_value = item.new_value.strip()
+
+        target_list = lists.get(list_name)
+
+        if target_list is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Satır {row_number}: GlobalList bulunamadı: {list_name}",
+            )
+
+        existing_items = {
+            element.get("value"): element for element in target_list.findall("LISTITEM")
+        }
+
+        if operation == "add":
+            if not new_value or new_value in existing_items:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Satır {row_number}: Eklenecek değer boş veya zaten mevcut.",
+                )
+
+            ET.SubElement(target_list, "LISTITEM", {"value": new_value})
+
+        elif operation == "remove":
+            if not old_value or old_value not in existing_items:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Satır {row_number}: Silinecek değer bulunamadı.",
+                )
+
+            target_list.remove(existing_items[old_value])
+
+        elif operation == "update":
+            if (
+                not old_value
+                or not new_value
+                or old_value not in existing_items
+                or (new_value in existing_items and new_value != old_value)
+                or old_value == new_value
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Satır {row_number}: Update değerleri geçersiz.",
+                )
+
+            existing_items[old_value].set("value", new_value)
+
+        changes.append(
+            {
+                "list_name": list_name,
+                "operation": operation,
+                "old_value": old_value,
+                "new_value": new_value,
+            }
+        )
+
+    preview_xml = ET.tostring(root, encoding="utf-8")
+
+    saved_preview = save_global_list_preview(
+        original_xml=original_xml,
+        preview_xml=preview_xml,
+        collection_name=request.collection_name,
+        operation="bulk_edit",
+    )
+
+    return {
+        "success": True,
+        "preview_id": saved_preview["preview_id"],
+        "original_sha256": saved_preview["original_sha256"],
+        "collection_name": request.collection_name,
+        "changes": changes,
+        "total_changes": len(changes),
+        "preview_xml": preview_xml.decode("utf-8"),
+        "message": "Toplu önizleme oluşturuldu. Sunucuya uygulanmadı.",
+    }
 
 
 global_list_apply_lock = threading.Lock()
@@ -1514,7 +1915,7 @@ def apply_work_item_type(request: WorkItemApplyRequest):
             )
 
         operation = metadata.get("operation")
-        if operation not in ("add", "update", "remove", "manual_edit"):
+        if operation not in ("add", "update", "remove", "manual_edit", "bulk_remove"):
             raise HTTPException(
                 status_code=403,
                 detail="Gerçek Apply yalnızca Add, Update, Remove ve doğrulanmış Manual Edit işlemlerini destekliyor.",
@@ -1638,6 +2039,20 @@ def apply_work_item_type(request: WorkItemApplyRequest):
                             "message", "Remove XML güvenlik doğrulaması başarısız."
                         )
                     )
+            elif operation == "bulk_remove":
+                field_change = validate_bulk_remove_field_change(
+                    original_xml=original_xml,
+                    modified_xml=modified_xml,
+                    field_refs=metadata["field_refs"],
+                )
+
+                if field_change.get("success") is not True:
+                    raise ValueError(
+                        field_change.get(
+                            "message",
+                            "Bulk Remove XML güvenlik doğrulaması başarısız.",
+                        )
+                    )
             elif operation == "manual_edit":
                 field_change = validate_manual_xml_change(
                     original_xml=original_xml,
@@ -1744,6 +2159,25 @@ def apply_work_item_type(request: WorkItemApplyRequest):
                     "Yeni preview oluşturmalısın."
                 ),
             )
+        try:
+            azure_baseline = ensure_azure_wit_baseline(
+                collection_name=collection_name,
+                project_name=project_name,
+                work_item_type=work_item_type,
+                current_xml=current_xml,
+            )
+
+        except Exception as exc:
+            logger.exception("Azure Repos başlangıç yedeği oluşturulamadı")
+
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Azure Repos başlangıç yedeği doğrulanamadı. "
+                    "Azure DevOps import başlatılmadı. "
+                    f"Hata: {exc}"
+                ),
+            ) from exc
         # Import öncesi yedek oluştur
         backup = save_wit_backup(
             current_xml,
@@ -1901,6 +2335,7 @@ def apply_work_item_type(request: WorkItemApplyRequest):
                         "backup_id": backup["backup_id"],
                         "operation": operation,
                         "field_ref": metadata.get("field_ref"),
+                        "field_refs": metadata.get("field_refs", []),
                         "field_name_change": name_change,
                         "error": str(exc),
                     },
@@ -1976,11 +2411,50 @@ def apply_work_item_type(request: WorkItemApplyRequest):
                     "Backup cleanup başarısız. "
                     "Doğrulanmış import sonucu etkilenmedi."
                 )
+        azure_backup = {
+            "success": False,
+            "status": "not_attempted",
+        }
 
+        try:
+            operation_labels = {
+                "add": "Add",
+                "update": "Update",
+                "remove": "Remove",
+                "manual_edit": "Manual edit",
+                "bulk_remove": "Bulk Remove",
+            }
+
+            action = operation_labels[operation]
+
+            if operation == "bulk_remove":
+                fields = metadata.get("field_refs", [])
+                field_names = ", ".join(fields)
+            else:
+                field_names = metadata.get("field_refs", "Unknown")
+
+            azure_backup = push_xml_to_azure_repo(
+                collection_name=collection_name,
+                project_name=project_name,
+                repository_id=azure_baseline["repository_id"],
+                file_path=azure_baseline["file_path"],
+                xml_content=verified_xml.decode("utf-8-sig"),
+                branch=azure_baseline["branch"],
+            )
+
+        except Exception as exc:
+            logger.exception("Azure otomatik backup başarısız")
+
+            azure_backup = {
+                "success": False,
+                "status": "failed",
+                "error": str(exc),
+            }
         return {
             "success": True,
             "preview_id": request.preview_id,
             "collection_name": collection_name,
+            "azure_backup": azure_backup,
             "project_name": project_name,
             "work_item_type": work_item_type,
             "backup_id": backup["backup_id"],
@@ -2673,7 +3147,7 @@ def check_multi_project_apply(request: MultiProjectApplyRequest):
             update_validation_valid = False
             remove_validation_valid = False
             manual_validation_valid = False
-
+            bulk_remove_validation_valid = False
             if metadata.get("operation") == "manual_edit" and hashes_valid:
                 try:
                     validation = validate_manual_xml_change(
@@ -2714,6 +3188,25 @@ def check_multi_project_apply(request: MultiProjectApplyRequest):
 
                 except (ValueError, KeyError, TypeError):
                     logger.exception("Remove XML güvenlik doğrulaması başarısız")
+
+            if metadata.get("operation") == "bulk_remove" and hashes_valid:
+                try:
+                    validation = validate_bulk_remove_field_change(
+                        original_xml=original_xml,
+                        modified_xml=modified_xml,
+                        field_refs=metadata["field_refs"],
+                    )
+
+                    bulk_remove_validation_valid = validation.get("success") is True
+
+                    logger.info(
+                        "BULK REMOVE VALIDATION | preview=%s | result=%s",
+                        preview_id,
+                        validation,
+                    )
+
+                except (ValueError, KeyError, TypeError):
+                    logger.exception("Bulk Remove XML güvenlik doğrulaması başarısız")
 
             if metadata.get("operation") == "update" and hashes_valid:
                 options = metadata.get("update_options")
@@ -2766,6 +3259,7 @@ def check_multi_project_apply(request: MultiProjectApplyRequest):
                     or (operation == "update" and update_validation_valid)
                     or (operation == "remove" and remove_validation_valid)
                     or (operation == "manual_edit" and manual_validation_valid)
+                    or (operation == "bulk_remove" and bulk_remove_validation_valid)
                 )
             )
             operation = metadata.get("operation")
@@ -2779,7 +3273,20 @@ def check_multi_project_apply(request: MultiProjectApplyRequest):
                 readiness_message = "Remove işlemi için ön kontroller başarılı."
             elif allowed and operation == "manual_edit":
                 readiness_message = "Manual XML Add işlemi için ön kontroller başarılı."
-
+            elif allowed and operation == "bulk_remove":
+                readiness_message = "Bulk Remove işlemi için ön kontroller başarılı."
+            elif operation == "bulk_remove":
+                if not bulk_remove_validation_valid:
+                    readiness_message = "Bulk Remove XML doğrulaması başarısız."
+                elif not server_xml_valid:
+                    readiness_message = (
+                        "Sunucudaki XML preview oluşturulduğundan beri değişmiş."
+                    )
+                else:
+                    readiness_message = (
+                        "Bulk Remove XML doğrulaması başarılı. "
+                        "Gerçek Apply için ek güvenlik kontrolleri bekleniyor."
+                    )
             elif operation == "manual_edit":
                 readiness_message = "Manual XML güvenlik doğrulaması başarısız."
             elif operation == "remove":
@@ -2795,7 +3302,14 @@ def check_multi_project_apply(request: MultiProjectApplyRequest):
                 {
                     "preview_id": preview_id,
                     "project_name": metadata.get("project_name"),
+                    "operation": operation,
                     "ready": allowed,
+                    "bulk_remove_validation_valid": (
+                        bulk_remove_validation_valid
+                        if operation == "bulk_remove"
+                        else None
+                    ),
+                    "server_xml_valid": server_xml_valid,
                     "message": readiness_message,
                 }
             )
@@ -2865,6 +3379,7 @@ def apply_multi_project_fields(request: MultiProjectApplyRequest):
                     "project_name": result["project_name"],
                     "success": True,
                     "backup_id": result["backup_id"],
+                    "azure_backup": result["azure_backup"],
                     "message": result["message"],
                 }
             )
@@ -3215,4 +3730,680 @@ def get_wit_preview_summary(preview_id: str):
         "field_ref": summary_field_ref,
         "field_name": summary_field_name,
         "import_performed": False,
+    }
+
+
+# Github pull push
+@app.post("/github/pull-xml")
+def github_pull(request: GitHubPullRequest):
+    result = pull_xml_from_github(request.file_path, request.branch)
+    return result
+
+
+@app.put("/github/push-xml")
+def github_push(request: GithubPushRequest):
+    try:
+        result = push_xml_to_github(
+            request.file_path, request.branch, request.xml_content, request.sha
+        )
+        return result
+
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    except requests.exceptions.HTTPError as error:
+        status = error.response.status_code if error.response is not None else 502
+
+        raise HTTPException(
+            status_code=status, detail="GitHub güncelleme işlemini reddetti."
+        ) from error
+
+
+@app.post("/garbage/analyze")
+def garbage_analyze(request: GarbageAnalysisRequest):
+    try:
+        session = create_winrm_session()
+
+        xml_bytes = get_project_xml(
+            session,
+            request.collection_name,
+            request.project_name,
+            request.work_item_type,
+        )
+
+        result = analyze_garbage(
+            collection_name=request.collection_name,
+            project_name=request.project_name,
+            work_item_type=request.work_item_type,
+            xml_bytes=xml_bytes,
+            start_date=request.start_date,
+        )
+
+        return result
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    except Exception:
+        logger.exception("Garbage Cleanup analizi başarısız")
+        raise HTTPException(
+            status_code=500,
+            detail="Garbage Cleanup analizi gerçekleştirilemedi.",
+        )
+
+
+@app.post("/github/backup-wit")
+def github_backup_wit(request: GithubWitBackupRequest):
+    try:
+        # 1. Azure DevOps Server bağlantısı
+        session = create_winrm_session()
+
+        # 2. Güncel Work Item Type XML'ini export et
+        xml_bytes = get_project_xml(
+            session,
+            request.collection_name,
+            request.project_name,
+            request.work_item_type,
+        )
+
+        xml_content = xml_bytes.decode("utf-8-sig")
+
+        # 3. Her XML için sabit GitHub dosya yolu
+        for name in (
+            request.collection_name,
+            request.project_name,
+            request.work_item_type,
+        ):
+            if not re.fullmatch(r"[A-Za-z0-9._-]+", name) or name in (".", ".."):
+                raise ValueError("Geçersiz XML yolu bileşeni.")
+
+        file_path = (
+            f"xml-definitions/"
+            f"{request.collection_name}/"
+            f"{request.project_name}/"
+            f"{request.work_item_type}.xml"
+        )
+
+        # 4. GitHub'a yedekle
+        result = push_xml_to_github(
+            file_path=file_path,
+            branch=request.branch,
+            xml_content=xml_content,
+            sha=None,
+        )
+
+        return {
+            **result,
+            "collection_name": request.collection_name,
+            "project_name": request.project_name,
+            "work_item_type": request.work_item_type,
+            "file_path": file_path,
+            "branch": request.branch,
+        }
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
+    except requests.exceptions.HTTPError as error:
+        status = error.response.status_code if error.response is not None else 502
+        raise HTTPException(
+            status_code=status,
+            detail="GitHub backup işlemi başarısız.",
+        ) from error
+
+    except (RuntimeError, UnicodeError, requests.exceptions.RequestException):
+        logger.exception("GitHub WIT backup başarısız")
+        raise HTTPException(
+            status_code=502,
+            detail="XML export veya GitHub bağlantısı başarısız.",
+        )
+
+
+@app.get("/github/xml-history")
+def github_xml_history(file_path: str, branch: str):
+    try:
+        return get_xml_history(file_path, branch)
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
+    except requests.exceptions.HTTPError as error:
+        status = error.response.status_code if error.response is not None else 502
+        raise HTTPException(
+            status_code=status,
+            detail="GitHub XML history alınamadı.",
+        ) from error
+
+    except requests.exceptions.RequestException as error:
+        raise HTTPException(
+            status_code=502,
+            detail="GitHub bağlantısı başarısız.",
+        ) from error
+
+
+@app.get("/github/xml-commit-diff")
+def github_xml_commit_diff(file_path: str, commit_sha: str):
+    try:
+        return get_xml_commit_diff(file_path, commit_sha)
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
+    except requests.exceptions.HTTPError as error:
+        status = error.response.status_code if error.response is not None else 502
+        raise HTTPException(
+            status_code=status,
+            detail="GitHub commit değişiklikleri alınamadı.",
+        ) from error
+
+    except requests.exceptions.RequestException as error:
+        raise HTTPException(
+            status_code=502,
+            detail="GitHub bağlantısı başarısız.",
+        ) from error
+
+
+@app.get("/github/xml-files")
+def github_xml_files(branch: str):
+    try:
+        return list_github_xml_files(branch)
+
+    except requests.exceptions.RequestException as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"GitHub API request failed: {error}",
+        ) from error
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
+
+def resolve_azure_repository(collection_name: str, project_name: str):
+    repositories = list_azure_git_repositories(
+        collection_name=collection_name,
+        project_name=project_name,
+    )
+
+    if not repositories:
+        raise ValueError(f"{project_name} projesinde Git repository bulunamadı.")
+
+    if len(repositories) == 1:
+        selected = repositories[0]
+    else:
+        # Birden fazla repository varsa proje adıyla eşleşeni seç.
+        matches = [
+            repo
+            for repo in repositories
+            if repo["name"].casefold() == project_name.casefold()
+        ]
+
+        if len(matches) != 1:
+            raise ValueError(
+                f"{project_name} projesinde birden fazla repository var. "
+                "Otomatik backup için repository seçimi yapılandırılmalı."
+            )
+
+        selected = matches[0]
+
+    default_branch = selected.get("default_branch")
+
+    if not default_branch:
+        raise ValueError(
+            f"{selected['name']} repository'sinin varsayılan branch'i yok."
+        )
+
+    return {
+        "repository_id": selected["id"],
+        "branch": default_branch.removeprefix("refs/heads/"),
+    }
+
+
+def ensure_azure_wit_baseline(
+    collection_name: str,
+    project_name: str,
+    work_item_type: str,
+    current_xml: bytes,
+):
+    repository = resolve_azure_repository(
+        collection_name=collection_name,
+        project_name=project_name,
+    )
+
+    repository_id = repository["repository_id"]
+    branch = repository["branch"]
+
+    for name in (collection_name, project_name, work_item_type):
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", name) or name in (".", ".."):
+            raise ValueError("Geçersiz XML yolu bileşeni.")
+
+    file_path = (
+        f"/xml-definitions/{collection_name}/" f"{project_name}/{work_item_type}.xml"
+    )
+
+    xml_content = current_xml.decode("utf-8-sig")
+
+    existing_xml = read_azure_repo_xml(
+        collection_name=collection_name,
+        project_name=project_name,
+        repository_id=repository_id,
+        file_path=file_path,
+        branch=branch,
+    )
+
+    if existing_xml is None:
+        result = push_xml_to_azure_repo(
+            collection_name=collection_name,
+            project_name=project_name,
+            repository_id=repository_id,
+            file_path=file_path,
+            xml_content=xml_content,
+            branch=branch,
+        )
+
+        return {
+            "file_path": file_path,
+            "branch": branch,
+            "repository_id": repository_id,
+            "baseline_created": True,
+            "push_id": result.get("push_id"),
+        }
+
+    if existing_xml != xml_content:
+        raise ValueError(
+            "Azure Repos'taki XML ile Azure DevOps Server'daki XML farklı. "
+            "Apply öncesinde sürümler uzlaştırılmalı."
+        )
+
+    return {
+        "file_path": file_path,
+        "branch": branch,
+        "repository_id": repository_id,
+        "baseline_created": False,
+    }
+
+
+def ensure_github_wit_baseline(
+    collection_name: str,
+    project_name: str,
+    work_item_type: str,
+    current_xml: bytes,
+):
+    branch = get_github_backup_branch()
+
+    for name in (collection_name, project_name, work_item_type):
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", name) or name in (".", ".."):
+            raise ValueError("Geçersiz XML yolu bileşeni.")
+
+    file_path = (
+        f"xml-definitions/{collection_name}/" f"{project_name}/{work_item_type}.xml"
+    )
+
+    xml_content = current_xml.decode("utf-8-sig")
+
+    try:
+        existing = pull_xml_from_github(file_path, branch)
+
+    except requests.exceptions.HTTPError as exc:
+        if exc.response is None or exc.response.status_code != 404:
+            raise
+
+        # Dosya yoksa mevcut sunucu XML'ini ilk sürüm olarak kaydet.
+        result = push_xml_to_github(
+            file_path=file_path,
+            branch=branch,
+            xml_content=xml_content,
+        )
+
+        return {
+            "file_path": file_path,
+            "branch": branch,
+            "baseline_created": result["changed"],
+            "sha": result["sha"],
+        }
+
+    if existing["xml_content"] != xml_content:
+        raise ValueError(
+            "GitHub'daki XML ile Azure DevOps'taki mevcut XML farklı. "
+            "Otomatik Apply öncesinde sürümler uzlaştırılmalı."
+        )
+
+    return {
+        "file_path": file_path,
+        "branch": branch,
+        "baseline_created": False,
+        "sha": existing["sha"],
+    }
+
+
+@app.post("/garbage/preview-bulk")
+def garbage_preview_bulk(request: GarbageBulkPreviewRequest):
+    field_refs = request.field_refs
+
+    if any(not isinstance(ref, str) or not ref.strip() for ref in field_refs) or len(
+        field_refs
+    ) != len(set(field_refs)):
+        raise HTTPException(
+            status_code=400,
+            detail="Alan referansları boş veya tekrarlı olamaz.",
+        )
+
+    try:
+        session = create_winrm_session()
+
+        original_xml = get_project_xml(
+            session,
+            request.collection_name,
+            request.project_name,
+            request.work_item_type,
+        )
+
+        results = []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            current_path = Path(temp_dir) / "original.xml"
+            current_path.write_bytes(original_xml)
+
+            for index, field_ref in enumerate(field_refs):
+                output_path = Path(temp_dir) / f"step_{index}.xml"
+
+                result = remove_field_from_xml(
+                    xml_path=str(current_path),
+                    field_ref=field_ref,
+                    output_path=str(output_path),
+                )
+
+                if not result.get("success"):
+                    return {
+                        "success": False,
+                        "message": f"{field_ref} kaldırılamadı. Preview oluşturulmadı.",
+                        "failed_field": field_ref,
+                        "details": result,
+                    }
+
+                results.append(
+                    {
+                        "field_ref": field_ref,
+                        "removed_controls": result.get("removed_controls", 0),
+                    }
+                )
+
+                current_path = output_path
+
+            preview_xml = current_path.read_bytes()
+
+        # XML yapısının geçerli olduğunu kontrol et.
+        original_root = ET.fromstring(original_xml)
+        preview_root = ET.fromstring(preview_xml)
+
+        if (
+            original_root.tag.split("}")[-1] != "WITD"
+            or preview_root.tag.split("}")[-1] != "WITD"
+        ):
+            raise ValueError("Geçersiz WIT XML.")
+
+        import uuid
+
+        preview_id = uuid.uuid4().hex
+        preview_dir = Path("previews") / "work-item-types" / preview_id
+        preview_dir.mkdir(parents=True, exist_ok=False)
+
+        original_hash = hashlib.sha256(original_xml).hexdigest()
+        preview_hash = hashlib.sha256(preview_xml).hexdigest()
+
+        metadata = {
+            "preview_id": preview_id,
+            "collection_name": request.collection_name,
+            "project_name": request.project_name,
+            "work_item_type": request.work_item_type,
+            "operation": "bulk_remove",
+            "field_refs": field_refs,
+            "original_sha256": original_hash,
+            "preview_sha256": preview_hash,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        (preview_dir / "original.xml").write_bytes(original_xml)
+        (preview_dir / "preview.xml").write_bytes(preview_xml)
+        (preview_dir / "metadata.json").write_text(
+            json.dumps(metadata, indent=2),
+            encoding="utf-8",
+        )
+
+        return {
+            "success": True,
+            "message": "Bulk Cleanup preview başarıyla oluşturuldu.",
+            "preview_id": preview_id,
+            "removed_fields": results,
+            "total_removed": len(results),
+            "original_sha256": original_hash,
+            "preview_sha256": preview_hash,
+            "apply_allowed": False,
+        }
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    except Exception:
+        logger.exception("Bulk Cleanup preview başarısız")
+        raise HTTPException(
+            status_code=500,
+            detail="Bulk Cleanup preview oluşturulamadı.",
+        )
+
+
+@app.post("/garbage/analyze-multi")
+def garbage_analyze_multi(request: GarbageMultiAnalysisRequest):
+    results = []
+
+    for project_name in dict.fromkeys(request.project_names):
+        try:
+            session = create_winrm_session()
+
+            xml_bytes = get_project_xml(
+                session,
+                request.collection_name,
+                project_name,
+                request.work_item_type,
+            )
+
+            result = analyze_garbage(
+                collection_name=request.collection_name,
+                project_name=project_name,
+                work_item_type=request.work_item_type,
+                xml_bytes=xml_bytes,
+                start_date=request.start_date,
+            )
+
+            results.append(
+                {
+                    "project_name": project_name,
+                    "status": "analyzed",
+                    "data": result,
+                }
+            )
+
+        except Exception as exc:
+            logger.exception(
+                "Multi-Project Garbage Analysis failed: %s",
+                project_name,
+            )
+
+            results.append(
+                {
+                    "project_name": project_name,
+                    "status": "error",
+                    "message": str(exc),
+                }
+            )
+
+    return {
+        "success": True,
+        "collection_name": request.collection_name,
+        "work_item_type": request.work_item_type,
+        "total_projects": len(results),
+        "analyzed_count": sum(item["status"] == "analyzed" for item in results),
+        "error_count": sum(item["status"] == "error" for item in results),
+        "results": results,
+    }
+
+
+class GlobalListXmlPreviewRequest(BaseModel):
+    collection_name: str
+    xml_content: str
+
+
+def parse_global_lists_xml(xml_bytes: bytes):
+    if not xml_bytes or len(xml_bytes) > 2 * 1024 * 1024:
+        raise ValueError("XML dosyası boş veya 2 MB sınırını aşıyor.")
+
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError as exc:
+        raise ValueError(f"Geçersiz XML: {exc}") from exc
+
+    if root.tag.split("}")[-1] != "GLOBALLISTS":
+        raise ValueError("XML kök elemanı GLOBALLISTS olmalıdır.")
+
+    result = {}
+
+    for global_list in root:
+        if global_list.tag.split("}")[-1] != "GLOBALLIST":
+            raise ValueError("GLOBALLISTS altında yalnızca GLOBALLIST olabilir.")
+
+        name = global_list.get("name")
+
+        if not name or not name.strip():
+            raise ValueError("GlobalList adı boş olamaz.")
+
+        if name in result:
+            raise ValueError(f"Tekrarlanan GlobalList: {name}")
+
+        values = set()
+
+        for item in global_list:
+            if item.tag.split("}")[-1] != "LISTITEM":
+                raise ValueError(
+                    f"{name}: Yalnızca LISTITEM elemanları kullanılabilir."
+                )
+
+            value = item.get("value")
+
+            if value is None or not value.strip():
+                raise ValueError(f"{name}: LISTITEM değeri boş olamaz.")
+
+            if value in values:
+                raise ValueError(f"{name}: Tekrarlanan değer: {value}")
+
+            values.add(value)
+
+        result[name] = values
+
+    return result
+
+
+@app.post("/global-lists/preview-xml")
+def preview_global_lists_xml(request: GlobalListXmlPreviewRequest):
+    collection_name = request.collection_name.strip()
+
+    if not collection_name:
+        raise HTTPException(status_code=400, detail="Collection seçilmelidir.")
+
+    uploaded_xml = request.xml_content.encode("utf-8")
+
+    try:
+        uploaded_lists = parse_global_lists_xml(uploaded_xml)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    session = create_winrm_session()
+    original_xml = export_global_list(session, collection_name)
+
+    try:
+        original_lists = parse_global_lists_xml(original_xml)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Sunucudaki XML doğrulanamadı: {exc}"
+        )
+
+    changes = []
+
+    all_names = sorted(set(original_lists) | set(uploaded_lists))
+
+    for name in all_names:
+        if name not in original_lists:
+            changes.append(
+                {
+                    "list_name": name,
+                    "operation": "add_list",
+                    "values": sorted(uploaded_lists[name]),
+                }
+            )
+            continue
+
+        if name not in uploaded_lists:
+            changes.append(
+                {
+                    "list_name": name,
+                    "operation": "remove_list",
+                    "values": sorted(original_lists[name]),
+                }
+            )
+            continue
+
+        added = uploaded_lists[name] - original_lists[name]
+        removed = original_lists[name] - uploaded_lists[name]
+
+        for value in sorted(added):
+            changes.append(
+                {
+                    "list_name": name,
+                    "operation": "add",
+                    "new_value": value,
+                }
+            )
+
+        for value in sorted(removed):
+            changes.append(
+                {
+                    "list_name": name,
+                    "operation": "remove",
+                    "old_value": value,
+                }
+            )
+
+    if not changes:
+        raise HTTPException(
+            status_code=400, detail="XML içeriğinde uygulanacak değişiklik bulunamadı."
+        )
+
+    saved_preview = save_global_list_preview(
+        original_xml=original_xml,
+        preview_xml=uploaded_xml,
+        collection_name=collection_name,
+        operation="xml_import",
+    )
+
+    return {
+        "success": True,
+        "preview_id": saved_preview["preview_id"],
+        "original_sha256": saved_preview["original_sha256"],
+        "collection_name": collection_name,
+        "changes": changes,
+        "total_changes": len(changes),
+        "preview_xml": uploaded_xml.decode("utf-8"),
+        "message": (
+            "XML doğrulandı ve önizleme oluşturuldu. " "Sunucuya henüz uygulanmadı."
+        ),
     }

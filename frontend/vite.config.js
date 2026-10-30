@@ -23,6 +23,18 @@ export default defineConfig({
         target: 'http://127.0.0.1:8003',
         changeOrigin: true,
       },
+      '/global-lists': {
+        target: 'http://127.0.0.1:8003',
+        changeOrigin: true,
+      },
+      '/github': {
+        target: 'http://127.0.0.1:8003',
+        changeOrigin: true,
+      },
+      '/azure-repos': {
+        target: 'http://127.0.0.1:8003',
+        changeOrigin: true,
+      },
     },
   },
 })

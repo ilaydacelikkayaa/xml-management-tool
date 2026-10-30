@@ -3,11 +3,14 @@ import Sidebar from './components/Sidebar'
 import './App.css'
 import XmlFields from './components/XmlFields'
 import GlobalLists from './components/GlobalLists'
+import GarbageCleanup from './components/GarbageCleanup'
+import AzureReposHistory from './components/AzureReposHistory'
 
 function App() {
   const [activePage, setActivePage] = useState('dashboard')
   const [collections, setCollections] = useState([])
   const [selectedCollection, setSelectedCollection] = useState('')
+  const [fieldToReview, setFieldToReview] = useState(null)
   const [collectionsLoading, setCollectionsLoading] = useState(true)
 
   const [stats, setStats] = useState({
@@ -17,7 +20,11 @@ function App() {
   })
   const [statsLoading, setStatsLoading] = useState(true)
   const [statsError, setStatsError] = useState('')
-
+  const handleReviewField = (field) => {
+    setFieldToReview(field)
+    setSelectedCollection(field.collection_name)
+    setActivePage('fields')
+  }
   // 1. Collection listesini yükle
   useEffect(() => {
     let cancelled = false
@@ -226,6 +233,7 @@ function App() {
                 </p>
               )}
 
+
               <div className="dashboard-stats-grid">
                 <article className="dashboard-stat-card">
                   <div className="dashboard-stat-top">
@@ -383,12 +391,24 @@ function App() {
           </div>
         )}
 
-        {activePage === 'fields' && (
-          <XmlFields selectedCollection={selectedCollection} />
-        )}
-
         {activePage === 'globalLists' && (
           <GlobalLists selectedCollection={selectedCollection} />
+        )}
+        {activePage === 'fields' && (
+          <XmlFields
+            selectedCollection={selectedCollection}
+            fieldToReview={fieldToReview}
+            onReviewHandled={() => setFieldToReview(null)}
+          />
+        )}
+        {activePage === 'azure' && (
+          <AzureReposHistory />
+        )}
+        {activePage === 'garbageCleanup' && (
+          <GarbageCleanup
+            selectedCollection={selectedCollection}
+            onReviewField={handleReviewField}
+          />
         )}
       </main>
     </div>

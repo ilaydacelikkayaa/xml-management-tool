@@ -31,7 +31,260 @@ server_url = os.getenv("AZURE_DEVOPS_SERVER_URL")
 token = os.getenv("AZURE_DEVOPS_PAT")
 
 
-# A
+def list_azure_git_repositories(collection_name: str, project_name: str):
+    if not server_url:
+        raise ValueError("AZURE_DEVOPS_SERVER_URL tanımlı değil.")
+
+    username = os.getenv("AZURE_DEVOPS_WINDOWS_USER")
+    password = os.getenv("AZURE_DEVOPS_WINDOWS_PASSWORD")
+
+    if not username or not password:
+        raise ValueError("Azure DevOps Windows kimlik bilgileri eksik.")
+
+    url = (
+        f"{server_url.rstrip('/')}/{collection_name}/"
+        f"{project_name}/_apis/git/repositories"
+    )
+
+    session = requests.Session()
+    session.trust_env = False
+    session.auth = HttpNtlmAuth(username, password)
+
+    response = session.get(
+        url,
+        params={"api-version": "7.0"},
+        timeout=20,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    return [
+        {
+            "id": repo["id"],
+            "name": repo["name"],
+            "default_branch": repo.get("defaultBranch"),
+        }
+        for repo in data.get("value", [])
+    ]
+
+
+def list_azure_repo_xml_files(
+    collection_name: str,
+    project_name: str,
+    repository_id: str,
+    branch: str = "main",
+):
+    username = os.getenv("AZURE_DEVOPS_WINDOWS_USER")
+    password = os.getenv("AZURE_DEVOPS_WINDOWS_PASSWORD")
+
+    if not server_url or not username or not password:
+        raise ValueError("Azure DevOps bağlantı bilgileri eksik.")
+
+    url = (
+        f"{server_url.rstrip('/')}/{collection_name}/"
+        f"{project_name}/_apis/git/repositories/"
+        f"{repository_id}/items"
+    )
+
+    session = requests.Session()
+    session.trust_env = False
+    session.auth = HttpNtlmAuth(username, password)
+
+    response = session.get(
+        url,
+        params={
+            "scopePath": "/",
+            "recursionLevel": "Full",
+            "versionDescriptor.version": branch,
+            "versionDescriptor.versionType": "branch",
+            "api-version": "7.0",
+        },
+        timeout=20,
+    )
+
+    response.raise_for_status()
+
+    return [
+        {
+            "path": item["path"],
+            "git_object_id": item.get("objectId"),
+        }
+        for item in response.json().get("value", [])
+        if not item.get("isFolder") and item.get("path", "").lower().endswith(".xml")
+    ]
+
+
+def read_azure_repo_xml(
+    collection_name: str,
+    project_name: str,
+    repository_id: str,
+    file_path: str,
+    branch: str = "main",
+):
+    username = os.getenv("AZURE_DEVOPS_WINDOWS_USER")
+    password = os.getenv("AZURE_DEVOPS_WINDOWS_PASSWORD")
+
+    if not server_url or not username or not password:
+        raise ValueError("Azure DevOps bağlantı bilgileri eksik.")
+
+    session = requests.Session()
+    session.trust_env = False
+    session.auth = HttpNtlmAuth(username, password)
+
+    url = (
+        f"{server_url.rstrip('/')}/{collection_name}/"
+        f"{project_name}/_apis/git/repositories/"
+        f"{repository_id}/items"
+    )
+
+    response = session.get(
+        url,
+        params={
+            "path": file_path,
+            "versionDescriptor.version": branch,
+            "versionDescriptor.versionType": "branch",
+            "api-version": "7.0",
+        },
+        timeout=20,
+    )
+
+    if response.status_code == 404:
+        return None
+
+    response.raise_for_status()
+    return response.content.decode("utf-8-sig")
+
+
+def push_xml_to_azure_repo(
+    collection_name: str,
+    project_name: str,
+    repository_id: str,
+    file_path: str,
+    xml_content: str,
+    branch: str = "main",
+):
+    username = os.getenv("AZURE_DEVOPS_WINDOWS_USER")
+    password = os.getenv("AZURE_DEVOPS_WINDOWS_PASSWORD")
+
+    if not server_url or not username or not password:
+        raise ValueError("Azure DevOps bağlantı bilgileri eksik.")
+
+    if not file_path.startswith("/xml-definitions/") or not file_path.endswith(".xml"):
+        raise ValueError("Geçersiz XML dosya yolu.")
+
+    if not xml_content.strip():
+        raise ValueError("XML içeriği boş olamaz.")
+
+    session = requests.Session()
+    session.trust_env = False
+    session.auth = HttpNtlmAuth(username, password)
+
+    base_url = (
+        f"{server_url.rstrip('/')}/{collection_name}/"
+        f"{project_name}/_apis/git/repositories/{repository_id}"
+    )
+
+    # Branch'in güncel commit ID'sini al.
+    refs_response = session.get(
+        f"{base_url}/refs",
+        params={
+            "filter": f"heads/{branch}",
+            "api-version": "7.0",
+        },
+        timeout=20,
+    )
+    refs_response.raise_for_status()
+
+    refs = [
+        ref
+        for ref in refs_response.json().get("value", [])
+        if ref.get("name") == f"refs/heads/{branch}"
+    ]
+
+    if not refs:
+        raise ValueError(f"Branch bulunamadı: {branch}")
+
+    old_object_id = refs[0]["objectId"]
+
+    # Dosya daha önce oluşturulmuş mu?
+    item_response = session.get(
+        f"{base_url}/items",
+        params={
+            "path": file_path,
+            "versionDescriptor.version": branch,
+            "versionDescriptor.versionType": "branch",
+            "api-version": "7.0",
+        },
+        timeout=20,
+    )
+
+    if item_response.status_code == 200:
+        existing_xml = item_response.content.decode("utf-8-sig")
+
+        if existing_xml == xml_content:
+            return {
+                "success": True,
+                "changed": False,
+                "status": "already_up_to_date",
+                "file_path": file_path,
+                "branch": branch,
+                "operation": "none",
+                "push_id": None,
+            }
+
+        change_type = "edit"
+
+    elif item_response.status_code == 404:
+        change_type = "add"
+
+    else:
+        item_response.raise_for_status()
+        raise ValueError("Dosyanın mevcut durumu belirlenemedi.")
+
+    payload = {
+        "refUpdates": [
+            {
+                "name": f"refs/heads/{branch}",
+                "oldObjectId": old_object_id,
+            }
+        ],
+        "commits": [
+            {
+                "comment": f"XML Backup: {file_path}",
+                "changes": [
+                    {
+                        "changeType": change_type,
+                        "item": {"path": file_path},
+                        "newContent": {
+                            "content": xml_content,
+                            "contentType": "rawtext",
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+    push_response = session.post(
+        f"{base_url}/pushes",
+        params={"api-version": "7.0"},
+        json=payload,
+        timeout=30,
+    )
+
+    push_response.raise_for_status()
+
+    return {
+        "success": True,
+        "changed": True,
+        "status": "committed",
+        "file_path": file_path,
+        "branch": branch,
+        "operation": change_type,
+        "push_id": push_response.json().get("pushId"),
+    }
 
 
 def get_project_ntlm(collection_name: str):
@@ -55,13 +308,165 @@ def get_project_ntlm(collection_name: str):
     return response.json()
 
 
+def get_azure_repo_xml_history(
+    collection_name: str,
+    project_name: str,
+    repository_id: str,
+    file_path: str,
+    branch: str = "main",
+):
+    username = os.getenv("AZURE_DEVOPS_WINDOWS_USER")
+    password = os.getenv("AZURE_DEVOPS_WINDOWS_PASSWORD")
+
+    if not server_url or not username or not password:
+        raise ValueError("Azure DevOps bağlantı bilgileri eksik.")
+
+    if not file_path.startswith("/xml-definitions/") or not file_path.endswith(".xml"):
+        raise ValueError("Geçersiz XML dosya yolu.")
+
+    session = requests.Session()
+    session.trust_env = False
+    session.auth = HttpNtlmAuth(username, password)
+
+    url = (
+        f"{server_url.rstrip('/')}/{collection_name}/"
+        f"{project_name}/_apis/git/repositories/"
+        f"{repository_id}/commits"
+    )
+
+    response = session.get(
+        url,
+        params={
+            "searchCriteria.itemPath": file_path,
+            "searchCriteria.itemVersion.version": branch,
+            "searchCriteria.itemVersion.versionType": "branch",
+            "searchCriteria.$top": 50,
+            "api-version": "7.0",
+        },
+        timeout=20,
+    )
+
+    response.raise_for_status()
+
+    return [
+        {
+            "commit_id": commit.get("commitId"),
+            "comment": commit.get("comment"),
+            "author": commit.get("author", {}).get("name"),
+            "date": commit.get("author", {}).get("date"),
+        }
+        for commit in response.json().get("value", [])
+    ]
+
+
+import difflib
+
+
+def get_azure_repo_xml_commit_diff(
+    collection_name: str,
+    project_name: str,
+    repository_id: str,
+    file_path: str,
+    commit_id: str,
+):
+    username = os.getenv("AZURE_DEVOPS_WINDOWS_USER")
+    password = os.getenv("AZURE_DEVOPS_WINDOWS_PASSWORD")
+
+    if not server_url or not username or not password:
+        raise ValueError("Azure DevOps bağlantı bilgileri eksik.")
+
+    if not file_path.startswith("/xml-definitions/") or not file_path.endswith(".xml"):
+        raise ValueError("Geçersiz XML dosya yolu.")
+
+    session = requests.Session()
+    session.trust_env = False
+    session.auth = HttpNtlmAuth(username, password)
+
+    base_url = (
+        f"{server_url.rstrip('/')}/{collection_name}/"
+        f"{project_name}/_apis/git/repositories/{repository_id}"
+    )
+
+    # Commit bilgisi ve parent commit
+    commit_response = session.get(
+        f"{base_url}/commits/{commit_id}",
+        params={"api-version": "7.0"},
+        timeout=20,
+    )
+    commit_response.raise_for_status()
+
+    commit_data = commit_response.json()
+    parents = commit_data.get("parents", [])
+    parent_id = parents[0] if parents else None
+
+    def read_xml_at_commit(version):
+        response = session.get(
+            f"{base_url}/items",
+            params={
+                "path": file_path,
+                "versionDescriptor.version": version,
+                "versionDescriptor.versionType": "commit",
+                "api-version": "7.0",
+            },
+            timeout=20,
+        )
+
+        if response.status_code == 404:
+            return None
+
+        response.raise_for_status()
+        return response.text
+
+    current_xml = read_xml_at_commit(commit_id)
+
+    if current_xml is None:
+        raise ValueError("Seçilen commit'te XML dosyası bulunamadı.")
+
+    previous_xml = read_xml_at_commit(parent_id) if parent_id else None
+
+    diff_lines = list(
+        difflib.unified_diff(
+            (previous_xml or "").splitlines(),
+            current_xml.splitlines(),
+            fromfile="previous",
+            tofile="current",
+            lineterm="",
+        )
+    )
+
+    return {
+        "commit_id": commit_id,
+        "parent_commit_id": parent_id,
+        "file_path": file_path,
+        "diff": "\n".join(diff_lines),
+        "added_lines": sum(
+            1
+            for line in diff_lines
+            if line.startswith("+") and not line.startswith("+++")
+        ),
+        "removed_lines": sum(
+            1
+            for line in diff_lines
+            if line.startswith("-") and not line.startswith("---")
+        ),
+    }
+
+
 def get_work_item_ids(
     project_name: str,
     work_item_type: str,
     start_date: date | None = None,
     *,
     collection_name: str,
+    date_field: str = "System.CreatedDate",
 ):
+    allowed_date_fields = {
+        "System.CreatedDate",
+        "System.ChangedDate",
+    }
+
+    if date_field not in allowed_date_fields:
+        raise ValueError("Geçersiz tarih alanı")
     safe_project_name = escape_wiql_value(project_name)
     safe_work_item_type = escape_wiql_value(work_item_type)
 
@@ -70,7 +475,7 @@ def get_work_item_ids(
             "Select [System.Id] From WorkItems "
             f"WHERE [System.WorkItemType] = '{safe_work_item_type}' "
             f"AND [System.TeamProject] = '{safe_project_name}' "
-            f"AND [System.CreatedDate] >= '{start_date}'"
+            f"AND [{date_field}] >= '{start_date}'"
         )
     }
 
@@ -135,7 +540,7 @@ def get_work_items(ids: list, *, collection_name: str):
     request = requests.get(
         auth=("", os.getenv("AZURE_DEVOPS_PAT")),
         url=second_url,
-        timeout=15,
+        timeout=(10, 60),
     )
 
     request.raise_for_status()
@@ -190,10 +595,33 @@ def analyze_field(
         ids,
         collection_name=collection_name,
     )
-
     analysis = analyze_work_items(work_items, field_ref)
-
     return analysis
+
+
+def analyze_project_fields(xml_bytes: bytes, work_items: list):
+    fields = list_xml_fields(xml_bytes)
+    results = []
+
+    for field in fields:
+        usage = analyze_work_items(work_items, field["refname"])
+
+        candidate = evaluate_cleanup_candidate({"usage": usage})
+
+        results.append(
+            {
+                "field_ref": field["refname"],
+                "field_name": field["name"],
+                "field_type": field["field_type"],
+                "total": usage["total"],
+                "filled": usage["filled"],
+                "empty": usage["empty"],
+                "usage_rate": usage["rate"],
+                "candidate": candidate,
+            }
+        )
+
+    return results
 
 
 def find_field_references(xml_path: str, field_ref: str):
@@ -242,14 +670,12 @@ def analyze_field_full(
 
 
 def evaluate_cleanup_candidate(analysis: dict):
-    rate = analysis["usage"]["rate"]
+    usage = analysis["usage"]
 
-    if rate == 0:
-        candidate = True
-    else:
-        candidate = False
+    if usage["total"] == 0:
+        return False
 
-    return candidate
+    return usage["rate"] == 0
 
 
 def build_field_report(analysis: dict):
@@ -1288,6 +1714,14 @@ def update_field_in_xml(
     }
 
 
+def contains_field_reference(value: str, field_ref: str) -> bool:
+    if not value:
+        return False
+
+    pattern = rf"(?<![\w.]){re.escape(field_ref)}(?![\w.])"
+    return re.search(pattern, value) is not None
+
+
 def remove_field_from_xml(xml_path: str, field_ref: str, output_path: str):
     if not field_ref or not field_ref.strip():
         raise ValueError("Field reference name boş olamaz.")
@@ -1315,8 +1749,6 @@ def remove_field_from_xml(xml_path: str, field_ref: str, output_path: str):
     if target_field is None:
         raise ValueError(f"Alan bulunamadı: {field_ref}")
 
-    # Önce diğer XML öğelerindeki bağımlılıkları kontrol et.
-    # FORM kontrolleri Remove sırasında kaldırılabilir.
     dependencies = []
 
     for element in root.iter():
@@ -1329,7 +1761,7 @@ def remove_field_from_xml(xml_path: str, field_ref: str, output_path: str):
             continue
 
         for attribute_name, attribute_value in element.attrib.items():
-            if field_ref in attribute_value:
+            if contains_field_reference(attribute_value, field_ref):
                 dependencies.append(
                     {
                         "element": tag,
@@ -1338,7 +1770,7 @@ def remove_field_from_xml(xml_path: str, field_ref: str, output_path: str):
                     }
                 )
 
-        if element.text and field_ref in element.text:
+        if contains_field_reference(element.text, field_ref):
             dependencies.append(
                 {
                     "element": tag,
@@ -1355,18 +1787,16 @@ def remove_field_from_xml(xml_path: str, field_ref: str, output_path: str):
             "dependencies": dependencies,
         }
 
-    # FORM altındaki Layout / WebLayout kontrollerini kaldır.
     removed_controls = remove_field_controls(root, field_ref)
 
-    # FIELD tanımını kaldır.
     fields_element.remove(target_field)
 
-    # Çıktıda referans kalmadığını kontrol et.
     remaining_references = []
 
     for element in root.iter():
         for attribute_name, value in element.attrib.items():
-            if field_ref in value:
+            if contains_field_reference(value, field_ref):
+
                 remaining_references.append(
                     {
                         "element": local_tag(element),
@@ -1374,7 +1804,7 @@ def remove_field_from_xml(xml_path: str, field_ref: str, output_path: str):
                     }
                 )
 
-        if element.text and field_ref in element.text:
+        if contains_field_reference(element.text, field_ref):
             remaining_references.append(
                 {
                     "element": local_tag(element),
@@ -1450,6 +1880,144 @@ def validate_remove_field_change(
                     "Remove XML doğrulaması başarılı."
                     if valid
                     else "Preview XML beklenen Remove değişikliğiyle eşleşmiyor."
+                ),
+            }
+
+    except (ET.ParseError, OSError, ValueError, TypeError) as error:
+        return {
+            "success": False,
+            "message": str(error),
+        }
+
+
+def validate_bulk_remove_field_change(
+    original_xml: bytes,
+    modified_xml: bytes,
+    field_refs: list[str],
+):
+    import tempfile
+
+    if (
+        not isinstance(field_refs, list)
+        or not field_refs
+        or any(not isinstance(ref, str) or not ref.strip() for ref in field_refs)
+        or len(field_refs) != len(set(field_refs))
+    ):
+        return {
+            "success": False,
+            "message": "Geçersiz veya tekrarlı field listesi.",
+        }
+
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            current_path = Path(temp_dir) / "original.xml"
+            current_path.write_bytes(original_xml)
+
+            for index, field_ref in enumerate(field_refs):
+                output_path = Path(temp_dir) / f"step_{index}.xml"
+
+                result = remove_field_from_xml(
+                    xml_path=str(current_path),
+                    field_ref=field_ref,
+                    output_path=str(output_path),
+                )
+
+                if result.get("success") is not True:
+                    return {
+                        "success": False,
+                        "message": f"{field_ref} doğrulanamadı.",
+                        "details": result,
+                    }
+
+                current_path = output_path
+
+            expected_root = ET.fromstring(current_path.read_bytes())
+            preview_root = ET.fromstring(modified_xml)
+
+            def canonical(element):
+                return ET.canonicalize(
+                    ET.tostring(element, encoding="unicode"),
+                    strip_text=True,
+                )
+
+            valid = canonical(expected_root) == canonical(preview_root)
+
+            return {
+                "success": valid,
+                "validated_fields": field_refs,
+                "message": (
+                    "Bulk Remove XML doğrulaması başarılı."
+                    if valid
+                    else "Preview XML beklenen Bulk Remove değişiklikleriyle eşleşmiyor."
+                ),
+            }
+
+    except (ET.ParseError, OSError, ValueError, TypeError) as error:
+        return {
+            "success": False,
+            "message": str(error),
+        }
+
+
+def validate_bulk_remove_field_change(
+    original_xml: bytes,
+    modified_xml: bytes,
+    field_refs: list[str],
+):
+    import tempfile
+
+    if (
+        not isinstance(field_refs, list)
+        or not field_refs
+        or any(not isinstance(ref, str) or not ref.strip() for ref in field_refs)
+        or len(field_refs) != len(set(field_refs))
+    ):
+        return {
+            "success": False,
+            "message": "Geçersiz veya tekrarlı field listesi.",
+        }
+
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            current_path = Path(temp_dir) / "original.xml"
+            current_path.write_bytes(original_xml)
+
+            for index, field_ref in enumerate(field_refs):
+                output_path = Path(temp_dir) / f"step_{index}.xml"
+
+                result = remove_field_from_xml(
+                    xml_path=str(current_path),
+                    field_ref=field_ref,
+                    output_path=str(output_path),
+                )
+
+                if result.get("success") is not True:
+                    return {
+                        "success": False,
+                        "message": f"{field_ref} doğrulanamadı.",
+                        "details": result,
+                    }
+
+                current_path = output_path
+
+            expected_root = ET.fromstring(current_path.read_bytes())
+            preview_root = ET.fromstring(modified_xml)
+
+            def canonical(element):
+                return ET.canonicalize(
+                    ET.tostring(element, encoding="unicode"),
+                    strip_text=True,
+                )
+
+            valid = canonical(expected_root) == canonical(preview_root)
+
+            return {
+                "success": valid,
+                "validated_fields": field_refs,
+                "message": (
+                    "Bulk Remove XML doğrulaması başarılı."
+                    if valid
+                    else "Preview XML beklenen Bulk Remove değişiklikleriyle eşleşmiyor."
                 ),
             }
 
@@ -1855,7 +2423,14 @@ def save_global_list_backup(xml_bytes: bytes, collection_name: str):
 def save_global_list_preview(
     original_xml: bytes, preview_xml: bytes, collection_name: str, operation: str
 ):
-    if operation not in {"add", "update", "remove"}:
+    if operation not in {
+        "add",
+        "update",
+        "remove",
+        "bulk_add",
+        "bulk_edit",
+        "xml_import",
+    }:
         raise ValueError("Geçersiz GlobalList işlemi")
 
     if not collection_name or not all(
@@ -2476,4 +3051,41 @@ def cleanup_old_wit_backups(
         "would_delete": would_delete,
         "kept": [backup_dir.name for _, backup_dir in eligible_backups[:keep]],
         "protected": protected_backups,
+    }
+
+
+def analyze_garbage(
+    collection_name: str,
+    project_name: str,
+    work_item_type: str,
+    xml_bytes: bytes,
+    start_date: date | None = None,
+):
+    if start_date is None:
+        start_date = date.today() - relativedelta(months=6)
+
+    ids = get_work_item_ids(
+        project_name,
+        work_item_type,
+        start_date,
+        collection_name=collection_name,
+        date_field="System.ChangedDate",
+    )
+
+    work_items = get_work_items(
+        ids,
+        collection_name=collection_name,
+    )
+
+    results = analyze_project_fields(xml_bytes, work_items)
+
+    return {
+        "collection_name": collection_name,
+        "project_name": project_name,
+        "work_item_type": work_item_type,
+        "start_date": start_date.isoformat(),
+        "total_work_items": len(work_items),
+        "total_fields": len(results),
+        "cleanup_candidates": sum(1 for result in results if result["candidate"]),
+        "fields": results,
     }

@@ -720,12 +720,26 @@ function XmlFields({ selectedCollection }) {
             setPreviewResults([])
 
             if (!response.ok || data.success !== true) {
-                setApplyError(
-                    'One or more imports failed or could not be verified. ' +
-                    'Inspect each project on the server. Do not retry automatically.'
-                )
-            }
+                const projectErrors = (data.results ?? [])
+                    .filter(result => result.success !== true)
+                    .map(result => {
+                        const message = result.message
+                        return `${result.project_name ?? 'Project'}: ${typeof message === 'string'
+                            ? message
+                            : JSON.stringify(message)
+                            }`
+                    })
 
+                const errorMessage =
+                    projectErrors.join('\n') ||
+                    (typeof data.detail === 'string'
+                        ? data.detail
+                        : data.detail
+                            ? JSON.stringify(data.detail)
+                            : data.message || 'Unknown import error.')
+
+                setApplyError(errorMessage)
+            }
         } catch (error) {
             setApplyError(
                 'Import response could not be confirmed. ' +
@@ -774,39 +788,64 @@ function XmlFields({ selectedCollection }) {
 
     return (
         <section>
-            {applyResult?.success === true && (
-                <div className="warning-overlay">
-                    <div
-                        className="warning-modal"
-                        role="alertdialog"
-                        aria-modal="true"
-                        aria-labelledby="import-success-title"
-                    >
-                        <div className="warning-header">
-                            <span aria-hidden="true">✓</span>
-                            <h2 id="import-success-title">
-                                Import Successful
-                            </h2>
-                        </div>
+            {applyResult?.success === true && (() => {
+                const results = applyResult.results ?? []
+                const allCommitted =
+                    results.length === applyResult.total_projects &&
+                    results.every(result =>
+                        result.success === true &&
+                        result.azure_backup?.success === true
+                    )
 
-                        <div className="warning-body">
-                            <p>
-                                All {applyResult.total_projects} project(s)
-                                were imported and verified successfully.
-                            </p>
-                        </div>
+                return (
+                    <div className="warning-overlay">
+                        <div
+                            className="warning-modal"
+                            role="alertdialog"
+                            aria-modal="true"
+                            aria-labelledby="import-success-title"
+                        >
+                            <div className="warning-header">
+                                <span aria-hidden="true">
+                                    {allCommitted ? '✓' : '!'}
+                                </span>
+                                <h2 id="import-success-title">
+                                    {allCommitted
+                                        ? 'Changes Applied Successfully'
+                                        : 'XML Applied — Repository Sync Warning'}
+                                </h2>
+                            </div>
 
-                        <div className="warning-footer">
-                            <button
-                                type="button"
-                                onClick={() => setApplyResult(null)}
-                            >
-                                OK
-                            </button>
+                            <div className="warning-body">
+                                {allCommitted ? (
+                                    <p>
+                                        All {applyResult.total_projects} project(s)
+                                        were imported, verified, and committed
+                                        to Azure Repos successfully.
+                                    </p>
+                                ) : (
+                                    <p>
+                                        XML changes were imported and verified,
+                                        but Azure Repos commit could not be confirmed
+                                        for every project. Check repository status
+                                        before making further changes.
+                                        Do not repeat Apply.
+                                    </p>
+                                )}
+                            </div>
+
+                            <div className="warning-footer">
+                                <button
+                                    type="button"
+                                    onClick={() => setApplyResult(null)}
+                                >
+                                    OK
+                                </button>
+                            </div>
                         </div>
                     </div>
-                </div>
-            )}
+                )
+            })()}
             {applyError && (
                 <div className="warning-overlay">
                     <div
@@ -824,7 +863,9 @@ function XmlFields({ selectedCollection }) {
                         </div>
 
                         <div className="warning-body">
-                            <p id="warning-description">{applyError}</p>
+                            <p id="warning-description" style={{ whiteSpace: 'pre-wrap' }}>
+                                {applyError}
+                            </p>
                         </div>
 
                         <div className="warning-footer">
