@@ -137,3 +137,184 @@ def push_xml_to_github(
     }
 
 
+def get_xml_history(file_path: str, branch: str):
+    load_dotenv()
+
+    owner = os.getenv("GITHUB_OWNER")
+    repo = os.getenv("GITHUB_REPO")
+    pat = os.getenv("GITHUB_TOKEN")
+
+    if not all([owner, repo, pat]):
+        raise ValueError("GitHub configuration is missing.")
+
+    if not file_path.startswith("xml-definitions/") or not file_path.endswith(".xml"):
+        raise ValueError("Invalid XML file path.")
+
+    if not branch:
+        raise ValueError("GitHub branch is required.")
+
+    url = f"https://api.github.com/repos/{owner}/{repo}/commits"
+
+    headers = {
+        "Authorization": f"Bearer {pat}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    response = requests.get(
+        url,
+        headers=headers,
+        params={
+            "path": file_path,
+            "sha": branch,
+            "per_page": 50,
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
+
+    history = []
+
+    for item in response.json():
+        commit = item["commit"]
+
+        history.append(
+            {
+                "sha": item["sha"],
+                "message": commit["message"],
+                "author": commit["author"]["name"] if commit["author"] else None,
+                "date": commit["author"]["date"] if commit["author"] else None,
+                "url": item["html_url"],
+            }
+        )
+
+    return {
+        "success": True,
+        "file_path": file_path,
+        "branch": branch,
+        "total": len(history),
+        "history": history,
+    }
+
+
+def get_xml_commit_diff(file_path: str, commit_sha: str):
+    load_dotenv()
+
+    owner = os.getenv("GITHUB_OWNER")
+    repo = os.getenv("GITHUB_REPO")
+    pat = os.getenv("GITHUB_TOKEN")
+
+    if not all([owner, repo, pat]):
+        raise ValueError("GitHub configuration is missing.")
+
+    if (
+        not file_path
+        or not file_path.lower().endswith(".xml")
+        or file_path.startswith("/")
+        or any(part in ("", ".", "..") for part in file_path.split("/"))
+    ):
+        raise ValueError("Invalid XML file path.")
+
+    import re
+
+    if not re.fullmatch(r"[a-fA-F0-9]{40}", commit_sha):
+        raise ValueError("Invalid commit SHA.")
+
+    url = f"https://api.github.com/repos/{owner}/{repo}/commits/{commit_sha}"
+
+    headers = {
+        "Authorization": f"Bearer {pat}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    response = requests.get(
+        url,
+        headers=headers,
+        timeout=15,
+    )
+    response.raise_for_status()
+
+    commit_data = response.json()
+
+    matching_file = next(
+        (
+            item
+            for item in commit_data.get("files", [])
+            if item["filename"] == file_path
+        ),
+        None,
+    )
+
+    if matching_file is None:
+        raise ValueError("The selected commit does not contain changes to this XML.")
+
+    return {
+        "success": True,
+        "file_path": file_path,
+        "commit_sha": commit_sha,
+        "message": commit_data["commit"]["message"],
+        "date": commit_data["commit"]["author"]["date"],
+        "status": matching_file["status"],
+        "additions": matching_file["additions"],
+        "deletions": matching_file["deletions"],
+        "patch": matching_file.get("patch"),
+        "commit_url": commit_data["html_url"],
+    }
+
+
+if __name__ == "__main__":
+    result = pull_xml_from_github(
+        "xml-definitions/sample.xml", "refactor/local-witadmin"
+    )
+
+    print("GitHub'daki güncel XML:")
+    print(result["xml_content"])
+
+    print("Güncel SHA:", result["sha"])
+
+
+def list_github_xml_files(branch: str):
+    load_dotenv()
+
+    owner = os.getenv("GITHUB_OWNER")
+    repo = os.getenv("GITHUB_REPO")
+    pat = os.getenv("GITHUB_TOKEN")
+
+    if not all([owner, repo, pat]):
+        raise ValueError("GitHub environment variables are missing.")
+
+    url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}"
+
+    headers = {
+        "Authorization": f"Bearer {pat}",
+        "Accept": "application/vnd.github+json",
+    }
+
+    response = requests.get(
+        url,
+        headers=headers,
+        params={"recursive": "1"},
+        timeout=15,
+    )
+    response.raise_for_status()
+
+    data = response.json()
+
+    if data.get("truncated"):
+        raise ValueError("GitHub repository tree is too large to list completely.")
+
+    xml_files = sorted(
+        item["path"]
+        for item in data.get("tree", [])
+        if item.get("type") == "blob"
+        and item.get("path", "").lower().endswith(".xml")
+        and item.get("path", "").startswith("xml-definitions/")
+    )
+
+    return {
+        "success": True,
+        "branch": branch,
+        "files": xml_files,
+        "total": len(xml_files),
+    }

@@ -49,6 +49,9 @@ from devops_backend import (
 from github_service import (
     pull_xml_from_github,
     push_xml_to_github,
+    get_xml_history,
+    get_xml_commit_diff,
+    list_github_xml_files,
 )
 
 logger = logging.getLogger(__name__)
@@ -3256,6 +3259,74 @@ def github_push(request: GithubPushRequest):
 
         raise HTTPException(
             status_code=status, detail="GitHub güncelleme işlemini reddetti."
+        ) from error
+
+
+@app.get("/github/xml-history")
+def github_xml_history(file_path: str, branch: str):
+    try:
+        return get_xml_history(file_path, branch)
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
+    except requests.exceptions.HTTPError as error:
+        status = error.response.status_code if error.response is not None else 502
+        raise HTTPException(
+            status_code=status,
+            detail="GitHub XML history alınamadı.",
+        ) from error
+
+    except requests.exceptions.RequestException as error:
+        raise HTTPException(
+            status_code=502,
+            detail="GitHub bağlantısı başarısız.",
+        ) from error
+
+
+@app.get("/github/xml-commit-diff")
+def github_xml_commit_diff(file_path: str, commit_sha: str):
+    try:
+        return get_xml_commit_diff(file_path, commit_sha)
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
+    except requests.exceptions.HTTPError as error:
+        status = error.response.status_code if error.response is not None else 502
+        raise HTTPException(
+            status_code=status,
+            detail="GitHub commit değişiklikleri alınamadı.",
+        ) from error
+
+    except requests.exceptions.RequestException as error:
+        raise HTTPException(
+            status_code=502,
+            detail="GitHub bağlantısı başarısız.",
+        ) from error
+
+
+@app.get("/github/xml-files")
+def github_xml_files(branch: str):
+    try:
+        return list_github_xml_files(branch)
+
+    except requests.exceptions.RequestException as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"GitHub API request failed: {error}",
+        ) from error
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
         ) from error
 
 
