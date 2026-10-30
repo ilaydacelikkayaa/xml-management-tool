@@ -4521,6 +4521,384 @@
   transform: translateY(-1px);
 }
 
+/* Excel Management */
+
+.excel-management-card {
+  padding: 26px;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  background: #ffffff;
+}
+
+.excel-card-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 24px;
+}
+
+.excel-card-icon {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 13px;
+  background: #eff6ff;
+  color: #2563eb;
+  font-size: 26px;
+  flex-shrink: 0;
+}
+
+.excel-card-header h3 {
+  margin: 0 0 5px;
+  font-size: 18px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.excel-card-header p {
+  margin: 0;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.excel-status {
+  margin-left: auto;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.excel-status.ready {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.excel-status.waiting {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.excel-card-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.excel-action-btn {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 20px;
+  min-height: 90px;
+  border: 1px solid #e2e8f0;
+  border-radius: 13px;
+  background: #f8fafc;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.excel-action-btn:hover:not(:disabled):not(.is-disabled) {
+  background: #eff6ff;
+  border-color: #93c5fd;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 18px rgba(37, 99, 235, 0.08);
+}
+
+.excel-action-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border-radius: 11px;
+  background: #dbeafe;
+  color: #2563eb;
+  font-size: 25px;
+  font-weight: 600;
+}
+
+.excel-action-content {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.excel-action-content strong {
+  font-size: 14px;
+  color: #0f172a;
+}
+
+.excel-action-content small {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.excel-action-btn:disabled,
+.excel-action-btn.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.excel-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  overflow: hidden;
+}
+
+.excel-card-notice {
+  margin-top: 16px;
+  padding: 12px 15px;
+  border-radius: 9px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.excel-preview-section {
+  margin-top: 26px;
+  padding-top: 22px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.excel-preview-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 15px;
+}
+
+.excel-preview-heading h4 {
+  margin: 0;
+  font-size: 16px;
+  color: #0f172a;
+}
+
+.excel-preview-heading span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.excel-table-scroll {
+  overflow-x: auto;
+}
+
+.excel-preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.excel-preview-table th {
+  padding: 13px;
+  background: #f8fafc;
+  color: #64748b;
+  font-weight: 600;
+  text-align: left;
+}
+
+.excel-preview-table td {
+  padding: 14px 13px;
+  border-bottom: 1px solid #f1f5f9;
+  color: #334155;
+}
+
+.excel-operation {
+  display: inline-block;
+  padding: 5px 9px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.excel-operation.add {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.excel-operation.remove {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.excel-operation.update {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.excel-preview-note {
+  margin-top: 14px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+@media (max-width: 640px) {
+  .excel-card-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .excel-card-header {
+    flex-wrap: wrap;
+  }
+
+  .excel-status {
+    margin-left: 0;
+  }
+}
+
+.excel-template-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.excel-template-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 4px;
+  border: none;
+  background: transparent;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+
+.excel-template-link:hover {
+  color: #2563eb;
+  text-decoration: underline;
+}
+
+.excel-apply-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+
+.excel-apply-btn {
+  padding: 12px 22px;
+  border: none;
+  border-radius: 10px;
+  background: #2563eb;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+
+.excel-apply-btn:hover:not(:disabled) {
+  background: #1d4ed8;
+  transform: translateY(-1px);
+}
+
+.excel-apply-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.global-confirm-details {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 18px;
+}
+
+.global-confirm-collection,
+.global-confirm-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 16px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.global-confirm-collection {
+  background: #f8fafc;
+}
+
+.global-confirm-collection span,
+.global-confirm-row span {
+  color: #64748b;
+}
+
+.global-confirm-summary {
+  display: flex;
+  justify-content: space-between;
+  padding: 15px 16px;
+  align-items: center;
+}
+
+.global-confirm-summary span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.global-confirm-table-wrap {
+  overflow-x: auto;
+}
+
+.excel-import-feedback {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid #bfdbfe;
+  border-radius: 11px;
+  background: #eff6ff;
+  color: #1e40af;
+}
+
+.excel-import-feedback strong {
+  font-size: 13px;
+}
+
+.excel-import-feedback p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.excel-import-ready {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+  color: #166534;
+}
+
+.excel-feedback-check {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.excel-loading-spinner {
+  width: 19px;
+  height: 19px;
+  border: 2px solid #bfdbfe;
+  border-top-color: #2563eb;
+  border-radius: 50%;
+  animation: excel-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes excel-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .gc-multi-project-list {
   display: flex;
   flex-direction: column;

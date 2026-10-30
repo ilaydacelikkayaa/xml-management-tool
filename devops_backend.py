@@ -2423,7 +2423,14 @@ def save_global_list_backup(xml_bytes: bytes, collection_name: str):
 def save_global_list_preview(
     original_xml: bytes, preview_xml: bytes, collection_name: str, operation: str
 ):
-    if operation not in {"add", "update", "remove"}:
+    if operation not in {
+        "add",
+        "update",
+        "remove",
+        "bulk_add",
+        "bulk_edit",
+        "xml_import",
+    }:
         raise ValueError("Geçersiz GlobalList işlemi")
 
     if not collection_name or not all(

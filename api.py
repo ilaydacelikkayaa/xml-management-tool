@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from datetime import date
 from pathlib import Path
 import logging
+from typing import Literal
 import difflib
 import tempfile
 import xml.etree.ElementTree as ET
@@ -994,6 +995,120 @@ def preview_remove_global_list(request: GlobalListRemoveRequest):
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+class GlobalListBulkItem(BaseModel):
+    list_name: str
+    operation: Literal["add", "remove", "update"]
+    old_value: str = ""
+    new_value: str = ""
+
+
+class GlobalListBulkPreviewRequest(BaseModel):
+    collection_name: str
+    items: list[GlobalListBulkItem]
+
+
+@app.post("/global-lists/preview-bulk")
+def preview_bulk_global_lists(request: GlobalListBulkPreviewRequest):
+
+    if not request.collection_name.strip():
+        raise HTTPException(status_code=400, detail="Collection gerekli.")
+
+    if not request.items:
+        raise HTTPException(status_code=400, detail="En az bir işlem gerekli.")
+
+    session = create_winrm_session()
+    original_xml = export_global_list(session, request.collection_name)
+
+    root = ET.fromstring(original_xml)
+
+    if root.tag.split("}")[-1] != "GLOBALLISTS":
+        raise HTTPException(status_code=400, detail="Geçersiz GlobalList XML.")
+
+    lists = {element.get("name"): element for element in root.iter("GLOBALLIST")}
+
+    changes = []
+
+    for row_number, item in enumerate(request.items, start=1):
+        list_name = item.list_name.strip()
+        operation = item.operation
+        old_value = item.old_value.strip()
+        new_value = item.new_value.strip()
+
+        target_list = lists.get(list_name)
+
+        if target_list is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Satır {row_number}: GlobalList bulunamadı: {list_name}",
+            )
+
+        existing_items = {
+            element.get("value"): element for element in target_list.findall("LISTITEM")
+        }
+
+        if operation == "add":
+            if not new_value or new_value in existing_items:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Satır {row_number}: Eklenecek değer boş veya zaten mevcut.",
+                )
+
+            ET.SubElement(target_list, "LISTITEM", {"value": new_value})
+
+        elif operation == "remove":
+            if not old_value or old_value not in existing_items:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Satır {row_number}: Silinecek değer bulunamadı.",
+                )
+
+            target_list.remove(existing_items[old_value])
+
+        elif operation == "update":
+            if (
+                not old_value
+                or not new_value
+                or old_value not in existing_items
+                or (new_value in existing_items and new_value != old_value)
+                or old_value == new_value
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Satır {row_number}: Update değerleri geçersiz.",
+                )
+
+            existing_items[old_value].set("value", new_value)
+
+        changes.append(
+            {
+                "list_name": list_name,
+                "operation": operation,
+                "old_value": old_value,
+                "new_value": new_value,
+            }
+        )
+
+    preview_xml = ET.tostring(root, encoding="utf-8")
+
+    saved_preview = save_global_list_preview(
+        original_xml=original_xml,
+        preview_xml=preview_xml,
+        collection_name=request.collection_name,
+        operation="bulk_edit",
+    )
+
+    return {
+        "success": True,
+        "preview_id": saved_preview["preview_id"],
+        "original_sha256": saved_preview["original_sha256"],
+        "collection_name": request.collection_name,
+        "changes": changes,
+        "total_changes": len(changes),
+        "preview_xml": preview_xml.decode("utf-8"),
+        "message": "Toplu önizleme oluşturuldu. Sunucuya uygulanmadı.",
+    }
 
 
 global_list_apply_lock = threading.Lock()
@@ -4143,3 +4258,151 @@ def garbage_analyze_multi(request: GarbageMultiAnalysisRequest):
     }
 
 
+class GlobalListXmlPreviewRequest(BaseModel):
+    collection_name: str
+    xml_content: str
+
+
+def parse_global_lists_xml(xml_bytes: bytes):
+    if not xml_bytes or len(xml_bytes) > 2 * 1024 * 1024:
+        raise ValueError("XML dosyası boş veya 2 MB sınırını aşıyor.")
+
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError as exc:
+        raise ValueError(f"Geçersiz XML: {exc}") from exc
+
+    if root.tag.split("}")[-1] != "GLOBALLISTS":
+        raise ValueError("XML kök elemanı GLOBALLISTS olmalıdır.")
+
+    result = {}
+
+    for global_list in root:
+        if global_list.tag.split("}")[-1] != "GLOBALLIST":
+            raise ValueError("GLOBALLISTS altında yalnızca GLOBALLIST olabilir.")
+
+        name = global_list.get("name")
+
+        if not name or not name.strip():
+            raise ValueError("GlobalList adı boş olamaz.")
+
+        if name in result:
+            raise ValueError(f"Tekrarlanan GlobalList: {name}")
+
+        values = set()
+
+        for item in global_list:
+            if item.tag.split("}")[-1] != "LISTITEM":
+                raise ValueError(
+                    f"{name}: Yalnızca LISTITEM elemanları kullanılabilir."
+                )
+
+            value = item.get("value")
+
+            if value is None or not value.strip():
+                raise ValueError(f"{name}: LISTITEM değeri boş olamaz.")
+
+            if value in values:
+                raise ValueError(f"{name}: Tekrarlanan değer: {value}")
+
+            values.add(value)
+
+        result[name] = values
+
+    return result
+
+
+@app.post("/global-lists/preview-xml")
+def preview_global_lists_xml(request: GlobalListXmlPreviewRequest):
+    collection_name = request.collection_name.strip()
+
+    if not collection_name:
+        raise HTTPException(status_code=400, detail="Collection seçilmelidir.")
+
+    uploaded_xml = request.xml_content.encode("utf-8")
+
+    try:
+        uploaded_lists = parse_global_lists_xml(uploaded_xml)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    session = create_winrm_session()
+    original_xml = export_global_list(session, collection_name)
+
+    try:
+        original_lists = parse_global_lists_xml(original_xml)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Sunucudaki XML doğrulanamadı: {exc}"
+        )
+
+    changes = []
+
+    all_names = sorted(set(original_lists) | set(uploaded_lists))
+
+    for name in all_names:
+        if name not in original_lists:
+            changes.append(
+                {
+                    "list_name": name,
+                    "operation": "add_list",
+                    "values": sorted(uploaded_lists[name]),
+                }
+            )
+            continue
+
+        if name not in uploaded_lists:
+            changes.append(
+                {
+                    "list_name": name,
+                    "operation": "remove_list",
+                    "values": sorted(original_lists[name]),
+                }
+            )
+            continue
+
+        added = uploaded_lists[name] - original_lists[name]
+        removed = original_lists[name] - uploaded_lists[name]
+
+        for value in sorted(added):
+            changes.append(
+                {
+                    "list_name": name,
+                    "operation": "add",
+                    "new_value": value,
+                }
+            )
+
+        for value in sorted(removed):
+            changes.append(
+                {
+                    "list_name": name,
+                    "operation": "remove",
+                    "old_value": value,
+                }
+            )
+
+    if not changes:
+        raise HTTPException(
+            status_code=400, detail="XML içeriğinde uygulanacak değişiklik bulunamadı."
+        )
+
+    saved_preview = save_global_list_preview(
+        original_xml=original_xml,
+        preview_xml=uploaded_xml,
+        collection_name=collection_name,
+        operation="xml_import",
+    )
+
+    return {
+        "success": True,
+        "preview_id": saved_preview["preview_id"],
+        "original_sha256": saved_preview["original_sha256"],
+        "collection_name": collection_name,
+        "changes": changes,
+        "total_changes": len(changes),
+        "preview_xml": uploaded_xml.decode("utf-8"),
+        "message": (
+            "XML doğrulandı ve önizleme oluşturuldu. " "Sunucuya henüz uygulanmadı."
+        ),
+    }
