@@ -45,6 +45,12 @@ from devops_backend import (
     change_field_name,
     validate_remove_field_change,
     cleanup_old_wit_backups,
+    list_azure_git_repositories,
+    list_azure_repo_xml_files,
+    push_xml_to_azure_repo,
+    get_azure_repo_xml_history,
+    get_azure_repo_xml_commit_diff,
+    read_azure_repo_xml,
 )
 from github_service import (
     pull_xml_from_github,
@@ -173,6 +179,15 @@ class GitHubPullRequest(BaseModel):
     branch: str
 
 
+class AzureRepoBackupRequest(BaseModel):
+    collection_name: str
+    project_name: str
+    wit_name: str
+    repository_id: str
+    branch: str = "main"
+    confirm: bool = False
+
+
 class GithubPushRequest(BaseModel):
     file_path: str
     branch: str
@@ -249,6 +264,42 @@ def preview_add_field(request: AddFieldRequest):
         raise HTTPException(
             status_code=500, detail="Alan ekleme önizlemesi oluşturulamadı"
         )
+
+
+@app.get("/azure-repos/xml-history")
+def azure_repos_xml_history(
+    collection_name: str,
+    project_name: str,
+    repository_id: str,
+    file_path: str,
+    branch: str = "main",
+):
+    try:
+        return get_azure_repo_xml_history(
+            collection_name=collection_name,
+            project_name=project_name,
+            repository_id=repository_id,
+            file_path=file_path,
+            branch=branch,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+    except requests.exceptions.HTTPError as error:
+        status = error.response.status_code if error.response is not None else 502
+        logger.exception("Azure Repos XML History alınamadı")
+        raise HTTPException(
+            status_code=status,
+            detail="Azure Repos commit geçmişi alınamadı.",
+        ) from error
+    except requests.exceptions.RequestException as error:
+        logger.exception("Azure Repos History bağlantı hatası")
+        raise HTTPException(
+            status_code=502,
+            detail="Azure Repos sunucusuna bağlanılamadı.",
+        ) from error
 
 
 @app.post("/preview-update-field")
@@ -330,6 +381,174 @@ def preview_update_field(request: UpdateFieldRequest):
         raise HTTPException(
             status_code=500, detail="Alan güncelleme önizlemesi oluşturulamadı"
         )
+
+
+@app.get("/azure-repos/xml-commit-diff")
+def azure_repos_xml_commit_diff(
+    collection_name: str,
+    project_name: str,
+    repository_id: str,
+    file_path: str,
+    commit_id: str,
+):
+    try:
+        return get_azure_repo_xml_commit_diff(
+            collection_name=collection_name,
+            project_name=project_name,
+            repository_id=repository_id,
+            file_path=file_path,
+            commit_id=commit_id,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+    except requests.exceptions.HTTPError as error:
+        status = error.response.status_code if error.response is not None else 502
+        logger.exception("Azure Repos Commit Diff alınamadı")
+        raise HTTPException(
+            status_code=status,
+            detail="Azure Repos Commit Diff alınamadı.",
+        ) from error
+    except requests.exceptions.RequestException as error:
+        logger.exception("Azure Repos bağlantı hatası")
+        raise HTTPException(
+            status_code=502,
+            detail="Azure Repos sunucusuna bağlanılamadı.",
+        ) from error
+
+
+@app.get("/azure-repos/repositories")
+def azure_repos_repositories(collection_name: str, project_name: str):
+    try:
+        return list_azure_git_repositories(
+            collection_name=collection_name,
+            project_name=project_name,
+        )
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
+    except requests.exceptions.HTTPError as error:
+        status = error.response.status_code if error.response is not None else 502
+
+        logger.exception("Azure Repos repository listesi alınamadı")
+
+        raise HTTPException(
+            status_code=status,
+            detail="Azure Repos erişimi başarısız. PAT yetkilerini ve proje bilgilerini kontrol edin.",
+        ) from error
+
+    except requests.exceptions.RequestException as error:
+        logger.exception("Azure Repos bağlantı hatası")
+
+        raise HTTPException(
+            status_code=502,
+            detail="Azure Repos sunucusuna bağlanılamadı.",
+        ) from error
+
+
+@app.get("/azure-repos/xml-files")
+def azure_repos_xml_files(
+    collection_name: str,
+    project_name: str,
+    repository_id: str,
+    branch: str = "main",
+):
+    try:
+        return list_azure_repo_xml_files(
+            collection_name=collection_name,
+            project_name=project_name,
+            repository_id=repository_id,
+            branch=branch,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+    except requests.exceptions.HTTPError as error:
+        status = error.response.status_code if error.response is not None else 502
+        logger.exception("Azure Repos XML dosyaları listelenemedi")
+        raise HTTPException(
+            status_code=status,
+            detail="Azure Repos XML dosyaları alınamadı.",
+        ) from error
+    except requests.exceptions.RequestException as error:
+        logger.exception("Azure Repos bağlantı hatası")
+        raise HTTPException(
+            status_code=502,
+            detail="Azure Repos sunucusuna bağlanılamadı.",
+        ) from error
+
+
+@app.post("/azure-repos/backup-wit")
+def azure_repos_backup_wit(request: AzureRepoBackupRequest):
+    if not request.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Commit için confirm=true gerekli.",
+        )
+
+    try:
+        collection = request.collection_name
+        project = request.project_name
+        wit = request.wit_name
+
+        # Dosya yolunda güvenli isimler kullan.
+        for value in (collection, project, wit):
+            if not re.fullmatch(r"[A-Za-z0-9._-]+", value):
+                raise ValueError("Geçersiz collection, project veya WIT adı.")
+
+        file_path = f"/xml-definitions/{collection}/{project}/{wit}.xml"
+
+        # Mevcut GitHub backup endpoint'indeki XML export yöntemini kullan.
+        session = create_winrm_session()
+
+        xml_bytes = get_project_xml(
+            session,
+            collection,
+            project,
+            wit,
+        )
+
+        xml_content = xml_bytes.decode("utf-8-sig")
+
+        result = push_xml_to_azure_repo(
+            collection_name=collection,
+            project_name=project,
+            repository_id=request.repository_id,
+            file_path=file_path,
+            xml_content=xml_content,
+            branch=request.branch,
+        )
+
+        return result
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
+    except requests.exceptions.HTTPError as error:
+        status = error.response.status_code if error.response is not None else 502
+        logger.exception("Azure Repos backup başarısız")
+        raise HTTPException(
+            status_code=status,
+            detail="Azure Repos commit işlemi başarısız.",
+        ) from error
+
+    except requests.exceptions.RequestException as error:
+        logger.exception("Azure Repos bağlantı hatası")
+        raise HTTPException(
+            status_code=502,
+            detail="Azure Repos bağlantı hatası.",
+        ) from error
 
 
 @app.post("/preview-remove-field")
@@ -1782,6 +2001,25 @@ def apply_work_item_type(request: WorkItemApplyRequest):
                     "Yeni preview oluşturmalısın."
                 ),
             )
+        try:
+            azure_baseline = ensure_azure_wit_baseline(
+                collection_name=collection_name,
+                project_name=project_name,
+                work_item_type=work_item_type,
+                current_xml=current_xml,
+            )
+
+        except Exception as exc:
+            logger.exception("Azure Repos başlangıç yedeği oluşturulamadı")
+
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Azure Repos başlangıç yedeği doğrulanamadı. "
+                    "Azure DevOps import başlatılmadı. "
+                    f"Hata: {exc}"
+                ),
+            ) from exc
         # Import öncesi yedek oluştur
         backup = save_wit_backup(
             current_xml,
@@ -2014,11 +2252,50 @@ def apply_work_item_type(request: WorkItemApplyRequest):
                     "Backup cleanup başarısız. "
                     "Doğrulanmış import sonucu etkilenmedi."
                 )
+        azure_backup = {
+            "success": False,
+            "status": "not_attempted",
+        }
 
+        try:
+            operation_labels = {
+                "add": "Add",
+                "update": "Update",
+                "remove": "Remove",
+                "manual_edit": "Manual edit",
+                "bulk_remove": "Bulk Remove",
+            }
+
+            action = operation_labels[operation]
+
+            if operation == "bulk_remove":
+                fields = metadata.get("field_refs", [])
+                field_names = ", ".join(fields)
+            else:
+                field_names = metadata.get("field_refs", "Unknown")
+
+            azure_backup = push_xml_to_azure_repo(
+                collection_name=collection_name,
+                project_name=project_name,
+                repository_id=azure_baseline["repository_id"],
+                file_path=azure_baseline["file_path"],
+                xml_content=verified_xml.decode("utf-8-sig"),
+                branch=azure_baseline["branch"],
+            )
+
+        except Exception as exc:
+            logger.exception("Azure otomatik backup başarısız")
+
+            azure_backup = {
+                "success": False,
+                "status": "failed",
+                "error": str(exc),
+            }
         return {
             "success": True,
             "preview_id": request.preview_id,
             "collection_name": collection_name,
+            "azure_backup": azure_backup,
             "project_name": project_name,
             "work_item_type": work_item_type,
             "backup_id": backup["backup_id"],
@@ -2903,6 +3180,7 @@ def apply_multi_project_fields(request: MultiProjectApplyRequest):
                     "project_name": result["project_name"],
                     "success": True,
                     "backup_id": result["backup_id"],
+                    "azure_backup": result["azure_backup"],
                     "message": result["message"],
                 }
             )
@@ -3417,6 +3695,110 @@ def github_xml_files(branch: str):
             status_code=400,
             detail=str(error),
         ) from error
+
+
+def resolve_azure_repository(collection_name: str, project_name: str):
+    repositories = list_azure_git_repositories(
+        collection_name=collection_name,
+        project_name=project_name,
+    )
+
+    if not repositories:
+        raise ValueError(f"{project_name} projesinde Git repository bulunamadı.")
+
+    if len(repositories) == 1:
+        selected = repositories[0]
+    else:
+        # Birden fazla repository varsa proje adıyla eşleşeni seç.
+        matches = [
+            repo
+            for repo in repositories
+            if repo["name"].casefold() == project_name.casefold()
+        ]
+
+        if len(matches) != 1:
+            raise ValueError(
+                f"{project_name} projesinde birden fazla repository var. "
+                "Otomatik backup için repository seçimi yapılandırılmalı."
+            )
+
+        selected = matches[0]
+
+    default_branch = selected.get("default_branch")
+
+    if not default_branch:
+        raise ValueError(
+            f"{selected['name']} repository'sinin varsayılan branch'i yok."
+        )
+
+    return {
+        "repository_id": selected["id"],
+        "branch": default_branch.removeprefix("refs/heads/"),
+    }
+
+
+def ensure_azure_wit_baseline(
+    collection_name: str,
+    project_name: str,
+    work_item_type: str,
+    current_xml: bytes,
+):
+    repository = resolve_azure_repository(
+        collection_name=collection_name,
+        project_name=project_name,
+    )
+
+    repository_id = repository["repository_id"]
+    branch = repository["branch"]
+
+    for name in (collection_name, project_name, work_item_type):
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", name) or name in (".", ".."):
+            raise ValueError("Geçersiz XML yolu bileşeni.")
+
+    file_path = (
+        f"/xml-definitions/{collection_name}/" f"{project_name}/{work_item_type}.xml"
+    )
+
+    xml_content = current_xml.decode("utf-8-sig")
+
+    existing_xml = read_azure_repo_xml(
+        collection_name=collection_name,
+        project_name=project_name,
+        repository_id=repository_id,
+        file_path=file_path,
+        branch=branch,
+    )
+
+    if existing_xml is None:
+        result = push_xml_to_azure_repo(
+            collection_name=collection_name,
+            project_name=project_name,
+            repository_id=repository_id,
+            file_path=file_path,
+            xml_content=xml_content,
+            branch=branch,
+        )
+
+        return {
+            "file_path": file_path,
+            "branch": branch,
+            "repository_id": repository_id,
+            "baseline_created": True,
+            "push_id": result.get("push_id"),
+        }
+
+    if existing_xml != xml_content:
+        raise ValueError(
+            "Azure Repos'taki XML ile Azure DevOps Server'daki XML farklı. "
+            "Apply öncesinde sürümler uzlaştırılmalı."
+        )
+
+    return {
+        "file_path": file_path,
+        "branch": branch,
+        "repository_id": repository_id,
+        "baseline_created": False,
+    }
 
 
 def ensure_github_wit_baseline(

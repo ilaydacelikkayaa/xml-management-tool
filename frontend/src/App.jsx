@@ -3,6 +3,7 @@ import Sidebar from './components/Sidebar'
 import './App.css'
 import XmlFields from './components/XmlFields'
 import GlobalLists from './components/GlobalLists'
+import AzureReposHistory from './components/AzureReposHistory'
 
 function App() {
   const [activePage, setActivePage] = useState('dashboard')
@@ -226,6 +227,7 @@ function App() {
                 </p>
               )}
 
+
               <div className="dashboard-stats-grid">
                 <article className="dashboard-stat-card">
                   <div className="dashboard-stat-top">
@@ -383,12 +385,16 @@ function App() {
           </div>
         )}
 
-        {activePage === 'fields' && (
-          <XmlFields selectedCollection={selectedCollection} />
-        )}
-
         {activePage === 'globalLists' && (
           <GlobalLists selectedCollection={selectedCollection} />
+        )}
+        {activePage === 'fields' && (
+          <XmlFields
+            selectedCollection={selectedCollection}
+          />
+        )}
+        {activePage === 'azure' && (
+          <AzureReposHistory />
         )}
       </main>
     </div>

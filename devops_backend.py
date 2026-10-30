@@ -31,7 +31,260 @@ server_url = os.getenv("AZURE_DEVOPS_SERVER_URL")
 token = os.getenv("AZURE_DEVOPS_PAT")
 
 
-# A
+def list_azure_git_repositories(collection_name: str, project_name: str):
+    if not server_url:
+        raise ValueError("AZURE_DEVOPS_SERVER_URL tanımlı değil.")
+
+    username = os.getenv("AZURE_DEVOPS_WINDOWS_USER")
+    password = os.getenv("AZURE_DEVOPS_WINDOWS_PASSWORD")
+
+    if not username or not password:
+        raise ValueError("Azure DevOps Windows kimlik bilgileri eksik.")
+
+    url = (
+        f"{server_url.rstrip('/')}/{collection_name}/"
+        f"{project_name}/_apis/git/repositories"
+    )
+
+    session = requests.Session()
+    session.trust_env = False
+    session.auth = HttpNtlmAuth(username, password)
+
+    response = session.get(
+        url,
+        params={"api-version": "7.0"},
+        timeout=20,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    return [
+        {
+            "id": repo["id"],
+            "name": repo["name"],
+            "default_branch": repo.get("defaultBranch"),
+        }
+        for repo in data.get("value", [])
+    ]
+
+
+def list_azure_repo_xml_files(
+    collection_name: str,
+    project_name: str,
+    repository_id: str,
+    branch: str = "main",
+):
+    username = os.getenv("AZURE_DEVOPS_WINDOWS_USER")
+    password = os.getenv("AZURE_DEVOPS_WINDOWS_PASSWORD")
+
+    if not server_url or not username or not password:
+        raise ValueError("Azure DevOps bağlantı bilgileri eksik.")
+
+    url = (
+        f"{server_url.rstrip('/')}/{collection_name}/"
+        f"{project_name}/_apis/git/repositories/"
+        f"{repository_id}/items"
+    )
+
+    session = requests.Session()
+    session.trust_env = False
+    session.auth = HttpNtlmAuth(username, password)
+
+    response = session.get(
+        url,
+        params={
+            "scopePath": "/",
+            "recursionLevel": "Full",
+            "versionDescriptor.version": branch,
+            "versionDescriptor.versionType": "branch",
+            "api-version": "7.0",
+        },
+        timeout=20,
+    )
+
+    response.raise_for_status()
+
+    return [
+        {
+            "path": item["path"],
+            "git_object_id": item.get("objectId"),
+        }
+        for item in response.json().get("value", [])
+        if not item.get("isFolder") and item.get("path", "").lower().endswith(".xml")
+    ]
+
+
+def read_azure_repo_xml(
+    collection_name: str,
+    project_name: str,
+    repository_id: str,
+    file_path: str,
+    branch: str = "main",
+):
+    username = os.getenv("AZURE_DEVOPS_WINDOWS_USER")
+    password = os.getenv("AZURE_DEVOPS_WINDOWS_PASSWORD")
+
+    if not server_url or not username or not password:
+        raise ValueError("Azure DevOps bağlantı bilgileri eksik.")
+
+    session = requests.Session()
+    session.trust_env = False
+    session.auth = HttpNtlmAuth(username, password)
+
+    url = (
+        f"{server_url.rstrip('/')}/{collection_name}/"
+        f"{project_name}/_apis/git/repositories/"
+        f"{repository_id}/items"
+    )
+
+    response = session.get(
+        url,
+        params={
+            "path": file_path,
+            "versionDescriptor.version": branch,
+            "versionDescriptor.versionType": "branch",
+            "api-version": "7.0",
+        },
+        timeout=20,
+    )
+
+    if response.status_code == 404:
+        return None
+
+    response.raise_for_status()
+    return response.content.decode("utf-8-sig")
+
+
+def push_xml_to_azure_repo(
+    collection_name: str,
+    project_name: str,
+    repository_id: str,
+    file_path: str,
+    xml_content: str,
+    branch: str = "main",
+):
+    username = os.getenv("AZURE_DEVOPS_WINDOWS_USER")
+    password = os.getenv("AZURE_DEVOPS_WINDOWS_PASSWORD")
+
+    if not server_url or not username or not password:
+        raise ValueError("Azure DevOps bağlantı bilgileri eksik.")
+
+    if not file_path.startswith("/xml-definitions/") or not file_path.endswith(".xml"):
+        raise ValueError("Geçersiz XML dosya yolu.")
+
+    if not xml_content.strip():
+        raise ValueError("XML içeriği boş olamaz.")
+
+    session = requests.Session()
+    session.trust_env = False
+    session.auth = HttpNtlmAuth(username, password)
+
+    base_url = (
+        f"{server_url.rstrip('/')}/{collection_name}/"
+        f"{project_name}/_apis/git/repositories/{repository_id}"
+    )
+
+    # Branch'in güncel commit ID'sini al.
+    refs_response = session.get(
+        f"{base_url}/refs",
+        params={
+            "filter": f"heads/{branch}",
+            "api-version": "7.0",
+        },
+        timeout=20,
+    )
+    refs_response.raise_for_status()
+
+    refs = [
+        ref
+        for ref in refs_response.json().get("value", [])
+        if ref.get("name") == f"refs/heads/{branch}"
+    ]
+
+    if not refs:
+        raise ValueError(f"Branch bulunamadı: {branch}")
+
+    old_object_id = refs[0]["objectId"]
+
+    # Dosya daha önce oluşturulmuş mu?
+    item_response = session.get(
+        f"{base_url}/items",
+        params={
+            "path": file_path,
+            "versionDescriptor.version": branch,
+            "versionDescriptor.versionType": "branch",
+            "api-version": "7.0",
+        },
+        timeout=20,
+    )
+
+    if item_response.status_code == 200:
+        existing_xml = item_response.content.decode("utf-8-sig")
+
+        if existing_xml == xml_content:
+            return {
+                "success": True,
+                "changed": False,
+                "status": "already_up_to_date",
+                "file_path": file_path,
+                "branch": branch,
+                "operation": "none",
+                "push_id": None,
+            }
+
+        change_type = "edit"
+
+    elif item_response.status_code == 404:
+        change_type = "add"
+
+    else:
+        item_response.raise_for_status()
+        raise ValueError("Dosyanın mevcut durumu belirlenemedi.")
+
+    payload = {
+        "refUpdates": [
+            {
+                "name": f"refs/heads/{branch}",
+                "oldObjectId": old_object_id,
+            }
+        ],
+        "commits": [
+            {
+                "comment": f"XML Backup: {file_path}",
+                "changes": [
+                    {
+                        "changeType": change_type,
+                        "item": {"path": file_path},
+                        "newContent": {
+                            "content": xml_content,
+                            "contentType": "rawtext",
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+    push_response = session.post(
+        f"{base_url}/pushes",
+        params={"api-version": "7.0"},
+        json=payload,
+        timeout=30,
+    )
+
+    push_response.raise_for_status()
+
+    return {
+        "success": True,
+        "changed": True,
+        "status": "committed",
+        "file_path": file_path,
+        "branch": branch,
+        "operation": change_type,
+        "push_id": push_response.json().get("pushId"),
+    }
 
 
 def get_project_ntlm(collection_name: str):
@@ -53,6 +306,150 @@ def get_project_ntlm(collection_name: str):
     response.raise_for_status()
 
     return response.json()
+
+
+def get_azure_repo_xml_history(
+    collection_name: str,
+    project_name: str,
+    repository_id: str,
+    file_path: str,
+    branch: str = "main",
+):
+    username = os.getenv("AZURE_DEVOPS_WINDOWS_USER")
+    password = os.getenv("AZURE_DEVOPS_WINDOWS_PASSWORD")
+
+    if not server_url or not username or not password:
+        raise ValueError("Azure DevOps bağlantı bilgileri eksik.")
+
+    if not file_path.startswith("/xml-definitions/") or not file_path.endswith(".xml"):
+        raise ValueError("Geçersiz XML dosya yolu.")
+
+    session = requests.Session()
+    session.trust_env = False
+    session.auth = HttpNtlmAuth(username, password)
+
+    url = (
+        f"{server_url.rstrip('/')}/{collection_name}/"
+        f"{project_name}/_apis/git/repositories/"
+        f"{repository_id}/commits"
+    )
+
+    response = session.get(
+        url,
+        params={
+            "searchCriteria.itemPath": file_path,
+            "searchCriteria.itemVersion.version": branch,
+            "searchCriteria.itemVersion.versionType": "branch",
+            "searchCriteria.$top": 50,
+            "api-version": "7.0",
+        },
+        timeout=20,
+    )
+
+    response.raise_for_status()
+
+    return [
+        {
+            "commit_id": commit.get("commitId"),
+            "comment": commit.get("comment"),
+            "author": commit.get("author", {}).get("name"),
+            "date": commit.get("author", {}).get("date"),
+        }
+        for commit in response.json().get("value", [])
+    ]
+
+
+import difflib
+
+
+def get_azure_repo_xml_commit_diff(
+    collection_name: str,
+    project_name: str,
+    repository_id: str,
+    file_path: str,
+    commit_id: str,
+):
+    username = os.getenv("AZURE_DEVOPS_WINDOWS_USER")
+    password = os.getenv("AZURE_DEVOPS_WINDOWS_PASSWORD")
+
+    if not server_url or not username or not password:
+        raise ValueError("Azure DevOps bağlantı bilgileri eksik.")
+
+    if not file_path.startswith("/xml-definitions/") or not file_path.endswith(".xml"):
+        raise ValueError("Geçersiz XML dosya yolu.")
+
+    session = requests.Session()
+    session.trust_env = False
+    session.auth = HttpNtlmAuth(username, password)
+
+    base_url = (
+        f"{server_url.rstrip('/')}/{collection_name}/"
+        f"{project_name}/_apis/git/repositories/{repository_id}"
+    )
+
+    # Commit bilgisi ve parent commit
+    commit_response = session.get(
+        f"{base_url}/commits/{commit_id}",
+        params={"api-version": "7.0"},
+        timeout=20,
+    )
+    commit_response.raise_for_status()
+
+    commit_data = commit_response.json()
+    parents = commit_data.get("parents", [])
+    parent_id = parents[0] if parents else None
+
+    def read_xml_at_commit(version):
+        response = session.get(
+            f"{base_url}/items",
+            params={
+                "path": file_path,
+                "versionDescriptor.version": version,
+                "versionDescriptor.versionType": "commit",
+                "api-version": "7.0",
+            },
+            timeout=20,
+        )
+
+        if response.status_code == 404:
+            return None
+
+        response.raise_for_status()
+        return response.text
+
+    current_xml = read_xml_at_commit(commit_id)
+
+    if current_xml is None:
+        raise ValueError("Seçilen commit'te XML dosyası bulunamadı.")
+
+    previous_xml = read_xml_at_commit(parent_id) if parent_id else None
+
+    diff_lines = list(
+        difflib.unified_diff(
+            (previous_xml or "").splitlines(),
+            current_xml.splitlines(),
+            fromfile="previous",
+            tofile="current",
+            lineterm="",
+        )
+    )
+
+    return {
+        "commit_id": commit_id,
+        "parent_commit_id": parent_id,
+        "file_path": file_path,
+        "diff": "\n".join(diff_lines),
+        "added_lines": sum(
+            1
+            for line in diff_lines
+            if line.startswith("+") and not line.startswith("+++")
+        ),
+        "removed_lines": sum(
+            1
+            for line in diff_lines
+            if line.startswith("-") and not line.startswith("---")
+        ),
+    }
 
 
 def get_work_item_ids(
